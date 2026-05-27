@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: media-gateway-postgres
+    environment:
+      POSTGRES_DB: media_gateway
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD: media_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media -d media_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  media-gateway:
+    build: .
+    container_name: media-gateway-app
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
