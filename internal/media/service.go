@@ -117,6 +117,19 @@ func (s *Service) GetMeta(ctx context.Context, id string) (Asset, error) {
 	return s.repo.GetByID(ctx, id)
 }
 
+func (s *Service) List(ctx context.Context, limit, offset int) ([]Asset, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.repo.List(ctx, limit, offset)
+}
+
 func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, error) {
 	asset, err := s.repo.GetByID(ctx, id)
 	if err != nil {

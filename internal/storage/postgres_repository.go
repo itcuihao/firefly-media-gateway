@@ -97,6 +97,38 @@ RETURNING
 	return asset, nil
 }
 
+func (r *PostgresRepository) List(ctx context.Context, limit, offset int) ([]media.Asset, error) {
+	const q = `
+SELECT
+	id, provider, provider_file_id, provider_bucket_or_chat,
+	public_url, mime_type, size_bytes, sha256,
+	project, usage, status, created_at, updated_at, deleted_at
+FROM media_assets
+ORDER BY created_at DESC
+LIMIT $1 OFFSET $2
+`
+
+	rows, err := r.db.QueryContext(ctx, q, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list media assets: %w", err)
+	}
+	defer rows.Close()
+
+	var assets []media.Asset
+	for rows.Next() {
+		asset, err := scanAsset(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan media asset: %w", err)
+		}
+		assets = append(assets, asset)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return assets, nil
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

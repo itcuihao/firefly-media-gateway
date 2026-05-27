@@ -48,7 +48,7 @@ func main() {
 	providers[r2Provider.Name()] = r2Provider
 
 	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
-	h := httpapi.NewServer(svc, cfg.AuthToken, logger)
+	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
