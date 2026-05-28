@@ -23,14 +23,22 @@ func (r *PostgresRepository) Create(ctx context.Context, input media.CreateAsset
 INSERT INTO media_assets (
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status
+	project, usage, status,
+	is_chunked, chunk_count, chunk_ids, total_bytes
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 RETURNING
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at
+	project, usage, status, created_at, updated_at, deleted_at,
+	is_chunked, chunk_count, chunk_ids, total_bytes
 `
+
+	chunkCount := len(input.ChunkIDs)
+	chunkIDs := input.ChunkIDs
+	if chunkIDs == nil {
+		chunkIDs = []string{}
+	}
 
 	row := r.db.QueryRowContext(ctx, q,
 		input.ID,
@@ -44,6 +52,10 @@ RETURNING
 		input.Project,
 		input.Usage,
 		media.StatusActive,
+		input.IsChunked,
+		chunkCount,
+		chunkIDs,
+		input.TotalBytes,
 	)
 
 	asset, err := scanAsset(row)
@@ -58,7 +70,8 @@ func (r *PostgresRepository) GetByID(ctx context.Context, id string) (media.Asse
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at
+	project, usage, status, created_at, updated_at, deleted_at,
+	is_chunked, chunk_count, chunk_ids, total_bytes
 FROM media_assets
 WHERE id = $1
 `
@@ -83,7 +96,8 @@ WHERE id = $1
 RETURNING
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at
+	project, usage, status, created_at, updated_at, deleted_at,
+	is_chunked, chunk_count, chunk_ids, total_bytes
 `
 
 	row := r.db.QueryRowContext(ctx, q, id, media.StatusDeleted)
@@ -102,7 +116,8 @@ func (r *PostgresRepository) List(ctx context.Context, limit, offset int) ([]med
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at
+	project, usage, status, created_at, updated_at, deleted_at,
+	is_chunked, chunk_count, chunk_ids, total_bytes
 FROM media_assets
 ORDER BY created_at DESC
 LIMIT $1 OFFSET $2
@@ -138,6 +153,7 @@ func scanAsset(s scanner) (media.Asset, error) {
 	var providerBucket sql.NullString
 	var sha256 sql.NullString
 	var deletedAt sql.NullTime
+	var chunkIDs []string
 
 	err := s.Scan(
 		&asset.ID,
@@ -154,6 +170,10 @@ func scanAsset(s scanner) (media.Asset, error) {
 		&asset.CreatedAt,
 		&asset.UpdatedAt,
 		&deletedAt,
+		&asset.IsChunked,
+		&asset.ChunkCount,
+		&chunkIDs,
+		&asset.TotalBytes,
 	)
 	if err != nil {
 		return media.Asset{}, err
@@ -168,6 +188,9 @@ func scanAsset(s scanner) (media.Asset, error) {
 	if deletedAt.Valid {
 		t := deletedAt.Time.UTC()
 		asset.DeletedAt = &t
+	}
+	if chunkIDs != nil {
+		asset.ChunkIDs = chunkIDs
 	}
 	asset.CreatedAt = asset.CreatedAt.UTC()
 	asset.UpdatedAt = asset.UpdatedAt.UTC()

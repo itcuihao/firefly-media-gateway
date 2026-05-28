@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,8 +16,10 @@ import (
 )
 
 const (
-	maxImageSizeBytes int64 = 10 * 1024 * 1024
-	maxVideoSizeBytes int64 = 120 * 1024 * 1024
+	maxImageSizeBytes      int64 = 10 * 1024 * 1024   // 10MB for images
+	maxVideoSizeBytes      int64 = 50 * 1024 * 1024   // 50MB Telegram limit
+	maxVideoSizeBytesChunk int64 = 200 * 1024 * 1024  // 200MB for members with chunking
+	chunkSize              int64 = 50 * 1024 * 1024    // 50MB per chunk
 )
 
 type UploadRequest struct {
@@ -25,6 +28,7 @@ type UploadRequest struct {
 	FileName            string
 	DeclaredContentType string
 	Reader              io.Reader
+	IsMember            bool // Enable chunked upload for large videos
 }
 
 type Service struct {
@@ -59,6 +63,7 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		return Asset{}, fmt.Errorf("provider %q: %w", s.defaultProvider, ErrProviderDisabled)
 	}
 
+	// Read entire file to temp file
 	tmpFile, sizeBytes, shaHex, sniff, err := persistUpload(req.Reader)
 	if err != nil {
 		return Asset{}, err
@@ -70,13 +75,30 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	if err != nil {
 		return Asset{}, err
 	}
+
+	// Validate size limits
 	if mediaKind == "image" && sizeBytes > maxImageSizeBytes {
 		return Asset{}, fmt.Errorf("image exceeds %d bytes: %w", maxImageSizeBytes, ErrFileTooLarge)
 	}
-	if mediaKind == "video" && sizeBytes > maxVideoSizeBytes {
-		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytes, ErrFileTooLarge)
+	if mediaKind == "video" && !req.IsMember && sizeBytes > maxVideoSizeBytes {
+		return Asset{}, fmt.Errorf("video exceeds %d bytes (upgrade to member for larger files): %w", maxVideoSizeBytes, ErrFileTooLarge)
+	}
+	if mediaKind == "video" && req.IsMember && sizeBytes > maxVideoSizeBytesChunk {
+		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytesChunk, ErrFileTooLarge)
 	}
 
+	// Check if chunking is needed
+	if sizeBytes <= chunkSize || !req.IsMember {
+		// Single file upload
+		return s.uploadSingle(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
+	}
+
+	// Chunked upload for large videos (member only)
+	return s.uploadChunked(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
+}
+
+// uploadSingle handles normal single-file upload
+func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, tmpFile *os.File, req UploadRequest, mimeType string, sizeBytes int64, shaHex string) (Asset, error) {
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
 		return Asset{}, fmt.Errorf("rewind temp file: %w", err)
 	}
@@ -105,6 +127,70 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		SHA256:               &sha,
 		Project:              strings.TrimSpace(req.Project),
 		Usage:                req.Usage,
+		IsChunked:            false,
+		TotalBytes:           sizeBytes,
+	})
+	if err != nil {
+		return Asset{}, fmt.Errorf("save media metadata failed: %w", err)
+	}
+
+	return asset, nil
+}
+
+// uploadChunked handles chunked upload for large videos
+func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider, tmpFile *os.File, req UploadRequest, mimeType string, sizeBytes int64, shaHex string) (Asset, error) {
+	// Read entire file into memory
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		return Asset{}, fmt.Errorf("read temp file: %w", err)
+	}
+
+	// Split into chunks
+	chunkCount := int((sizeBytes + chunkSize - 1) / chunkSize)
+	chunkIDs := make([]string, 0, chunkCount)
+
+	for i := 0; i < chunkCount; i++ {
+		start := int64(i) * chunkSize
+		end := start + chunkSize
+		if end > sizeBytes {
+			end = sizeBytes
+		}
+
+		chunkData := data[start:end]
+		chunkReader := bytes.NewReader(chunkData)
+
+		chunkName := fmt.Sprintf("%s.chunk%d", req.FileName, i)
+		upResult, err := p.Upload(ctx, provider.UploadInput{
+			FileName: chunkName,
+			MIMEType: mimeType,
+			Reader:   chunkReader,
+		})
+		if err != nil {
+			// Clean up already uploaded chunks
+			// TODO: delete already uploaded chunks on failure
+			return Asset{}, fmt.Errorf("upload chunk %d failed: %w", i, err)
+		}
+
+		chunkIDs = append(chunkIDs, upResult.ProviderFileID)
+	}
+
+	assetID := newUUID()
+	publicURL := fmt.Sprintf("%s/api/v1/media/%s", s.publicBaseURL, assetID)
+
+	sha := shaHex
+	asset, err := s.repo.Create(ctx, CreateAssetInput{
+		ID:             assetID,
+		Provider:       p.Name(),
+		ProviderFileID: "", // No single file_id for chunked assets
+		PublicURL:      publicURL,
+		MIMEType:       mimeType,
+		SizeBytes:      chunkSize, // Size per chunk (for compatibility)
+		SHA256:         &sha,
+		Project:        strings.TrimSpace(req.Project),
+		Usage:          req.Usage,
+		IsChunked:      true,
+		ChunkIDs:       chunkIDs,
+		TotalBytes:     sizeBytes,
 	})
 	if err != nil {
 		return Asset{}, fmt.Errorf("save media metadata failed: %w", err)
@@ -145,6 +231,68 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 	return p.GetAccessURL(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
 }
 
+// StreamAsset returns stream URLs for an asset
+// For single files: returns single URL
+// For chunked files: returns chunk URLs in order
+func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error) {
+	asset, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return StreamInfo{}, err
+	}
+	if asset.Status != StatusActive {
+		return StreamInfo{}, ErrNotFound
+	}
+
+	p, ok := s.providers[asset.Provider]
+	if !ok {
+		return StreamInfo{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
+	}
+
+	if !asset.IsChunked {
+		// Single file
+		url, err := p.GetAccessURL(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+		if err != nil {
+			return StreamInfo{}, err
+		}
+		return StreamInfo{
+			IsChunked:   false,
+			StreamURL:   url,
+			TotalBytes:  asset.TotalBytes,
+			MIMEType:    asset.MIMEType,
+			ChunkCount:  0,
+			ChunkURLs:   nil,
+		}, nil
+	}
+
+	// Chunked file - get URLs for all chunks
+	chunkURLs := make([]string, 0, len(asset.ChunkIDs))
+	for _, chunkID := range asset.ChunkIDs {
+		url, err := p.GetAccessURL(ctx, chunkID, asset.ProviderBucketOrChat)
+		if err != nil {
+			return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", err)
+		}
+		chunkURLs = append(chunkURLs, url)
+	}
+
+	return StreamInfo{
+		IsChunked:   true,
+		StreamURL:   "", // No single URL for chunked
+		TotalBytes:  asset.TotalBytes,
+		MIMEType:    asset.MIMEType,
+		ChunkCount:  len(chunkURLs),
+		ChunkURLs:   chunkURLs,
+	}, nil
+}
+
+type StreamInfo struct {
+	IsChunked   bool     `json:"isChunked"`
+	StreamURL   string   `json:"streamUrl,omitempty"`
+	TotalBytes  int64    `json:"totalBytes"`
+	MIMEType    string   `json:"mimeType"`
+	ChunkCount  int      `json:"chunkCount,omitempty"`
+	ChunkURLs   []string `json:"chunkUrls,omitempty"`
+}
+
 func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
 	asset, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -176,12 +324,15 @@ func persistUpload(src io.Reader) (*os.File, int64, string, []byte, error) {
 	sniff := make([]byte, 0, 512)
 	var total int64
 
+	// 200MB absolute max (for members with chunking)
+	const absoluteMax = 200 * 1024 * 1024
+
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
 			total += int64(n)
-			if total > maxVideoSizeBytes {
+			if total > absoluteMax {
 				tmpFile.Close()
 				_ = os.Remove(tmpFile.Name())
 				return nil, 0, "", nil, ErrFileTooLarge

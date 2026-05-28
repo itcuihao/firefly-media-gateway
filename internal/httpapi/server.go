@@ -14,7 +14,7 @@ import (
 	"firefly-media-gateway/internal/media"
 )
 
-const maxRequestBodyBytes int64 = 121 * 1024 * 1024
+const maxRequestBodyBytes int64 = 201 * 1024 * 1024 // 200MB + 1MB buffer
 
 type Server struct {
 	svc              *media.Service
@@ -41,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/media", s.withAuth(s.handleListMedia))
 	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.handleGetMedia)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
+	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.withAuth(s.handleStream))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
 	mux.HandleFunc("GET /api/v1/telegram/chat-ids", s.withAuth(s.handleGetTelegramChatIDs))
 
@@ -74,6 +75,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	project := strings.TrimSpace(r.FormValue("project"))
 	usage := strings.TrimSpace(r.FormValue("usage"))
+	isMember := r.FormValue("member") == "true" || r.FormValue("is_member") == "true"
 
 	asset, err := s.svc.Upload(r.Context(), media.UploadRequest{
 		Project:             project,
@@ -81,6 +83,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		FileName:            header.Filename,
 		DeclaredContentType: header.Header.Get("Content-Type"),
 		Reader:              file,
+		IsMember:            isMember,
 	})
 	if err != nil {
 		s.writeDomainError(w, r, err)
@@ -120,6 +123,22 @@ func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, asset)
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	if mediaID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
+		return
+	}
+
+	streamInfo, err := s.svc.StreamAsset(r.Context(), mediaID)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, streamInfo)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {

@@ -27,6 +27,11 @@ type Asset struct {
 	CreatedAt            time.Time  `json:"createdAt"`
 	UpdatedAt            time.Time  `json:"updatedAt"`
 	DeletedAt            *time.Time `json:"deletedAt,omitempty"`
+	// Chunked upload fields
+	IsChunked  bool     `json:"isChunked,omitempty"`
+	ChunkCount int      `json:"chunkCount,omitempty"`
+	ChunkIDs   []string `json:"chunkIds,omitempty"`
+	TotalBytes int64    `json:"totalBytes,omitempty"`
 }
 
 type CreateAssetInput struct {
@@ -40,4 +45,8 @@ type CreateAssetInput struct {
 	SHA256               *string
 	Project              string
 	Usage                string
+	// Chunked upload fields
+	IsChunked  bool
+	ChunkIDs   []string
+	TotalBytes int64
 }

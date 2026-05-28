@@ -268,9 +268,16 @@ curl -X POST https://your-worker.workers.dev/delete \
 
 | 限制项 | 值 |
 |--------|-----|
-| 最大文件大小 | 120MB（Telegram 限制） |
+| 最大文件大小 | 50MB（Telegram 限制） |
 | 免费请求次数 | 100,000 次/天 |
 | 执行时间 | CPU time limit |
+
+## 支持的文件类型
+
+- **图片**：JPEG, PNG, WebP
+- **视频**：MP4, WebM, QuickTime (.mov)
+
+> **注意**：所有文件通过 `document` 类型上传，保持原始质量不压缩。
 
 ## 后续获取文件 URL
 

@@ -80,8 +80,8 @@ const ALLOWED_MIME_TYPES = [
   'video/quicktime',
 ];
 
-// 最大文件大小（默认 120MB）
-const DEFAULT_MAX_SIZE = 120 * 1024 * 1024;
+// 最大文件大小（Telegram 限制 50MB）
+const DEFAULT_MAX_SIZE = 50 * 1024 * 1024;
 
 /**
  * 鉴权中间件

@@ -407,7 +407,7 @@ s3.delete_object(
 ```json
 {
   "success": false,
-  "error": "File size exceeds 125829120 bytes",
+  "error": "File size exceeds 52428800 bytes",
   "code": "FILE_TOO_LARGE"
 }
 ```
