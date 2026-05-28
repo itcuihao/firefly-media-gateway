@@ -17,16 +17,64 @@ services:
       timeout: 3s
       retries: 10
 
+  # Go 后端 - Direct 模式（直连 Telegram）
   media-gateway:
     build: .
     container_name: media-gateway-app
-    env_file:
-      - .env
+    environment:
+      # 数据库配置
+      DATABASE_URL: postgres://media:media_password@postgres:5432/media_gateway?sslmode=disable
+
+      # 存储模式
+      STORAGE_MODE: direct
+
+      # Direct 模式 Telegram 配置
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+
+      # 或使用多 bot 配置（JSON 格式）
+      # TELEGRAM_BOTS_CONFIG: ${TELEGRAM_BOTS_CONFIG}
+
+      # API 配置
+      MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN:-your_secret_token}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      APP_LISTEN_ADDR: :8080
+      UPLOAD_TIMEOUT_SECONDS: 120
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Go 后端 - Proxy 模式（通过 Worker）
+  # 使用 docker-compose --profile proxy up 启动
+  media-gateway-proxy:
+    build: .
+    container_name: media-gateway-proxy-app
+    environment:
+      # 数据库配置
+      DATABASE_URL: postgres://media:media_password@postgres:5432/media_gateway?sslmode=disable
+
+      # 存储模式
+      STORAGE_MODE: proxy
+
+      # Proxy 模式 Worker 配置
+      WORKER_BASE_URL: ${WORKER_BASE_URL}
+      WORKER_AUTH_TOKEN: ${WORKER_AUTH_TOKEN}
+
+      # API 配置
+      MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN:-your_secret_token}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8081}
+      APP_LISTEN_ADDR: :8080
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - proxy
+    restart: unless-stopped
 
 volumes:
   pgdata:

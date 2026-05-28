@@ -1,0 +1,46 @@
+name = "firefly-media-gateway"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# 环境变量（敏感信息建议使用 secrets）
+[vars]
+# MAX_UPLOAD_SIZE = "125829120"  # 120MB，可选
+
+# Secrets (使用 wrangler secret 命令设置)
+#
+# 方式一：单 bot 配置（简单场景）
+# TELEGRAM_BOT_TOKEN  - Telegram Bot Token
+# TELEGRAM_CHAT_ID     - Telegram Chat ID
+#
+# 方式二：多 bot 配置（推荐，JSON 格式）
+# TELEGRAM_BOTS_CONFIG = '{"bot1":{"token":"xxx","default_group":"group1"},"bot2":{"token":"yyy","default_group":"group2"}}'
+#
+# 通用配置
+# AUTH_TOKEN          - 可选：Bearer token 用于 API 鉴权
+# MAX_UPLOAD_SIZE     - 可选：最大上传大小（字节）
+
+[dev]
+port = 8787
+local_protocol = "http"
+
+# Routes configuration (for CORS)
+routes = [
+  { pattern = "/upload", method = "POST" },
+  { pattern = "/get", method = ["GET", "POST"] },
+  { pattern = "/delete", method = ["DELETE", "POST"] }
+]
+
+# 如果需要 D1 存储元数据（当前方案不需要）
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "firefly-media-gateway"
+# database_id = "your-database-id"
+
+# 如果需要 R2
+# [[r2_buckets]]
+# binding = "R2"
+# bucket_name = "firefly-media"
+
+[dev]
+port = 8787
+local_protocol = "http"

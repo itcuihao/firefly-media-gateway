@@ -19,10 +19,20 @@ type TelegramProvider struct {
 	client   *http.Client
 }
 
+// NewTelegramProvider 创建 Telegram provider（单 bot）
 func NewTelegramProvider(botToken, chatID string, timeout time.Duration) *TelegramProvider {
 	return &TelegramProvider{
 		botToken: botToken,
 		chatID:   chatID,
+		client:   &http.Client{Timeout: timeout},
+	}
+}
+
+// NewTelegramProviderWithConfig 创建 Telegram provider（支持多 bot）
+func NewTelegramProviderWithConfig(botToken, defaultGroup string, timeout time.Duration) *TelegramProvider {
+	return &TelegramProvider{
+		botToken: botToken,
+		chatID:   defaultGroup, // 使用 default_group 作为 chat_id
 		client:   &http.Client{Timeout: timeout},
 	}
 }
