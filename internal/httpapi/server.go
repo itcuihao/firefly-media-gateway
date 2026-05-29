@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -285,6 +286,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, context.Canceled):
+		// Client closed connection (context canceled). No need to return 500.
+		s.logger.Printf("[WARN]  %s %s => client closed connection (context canceled)", r.Method, r.URL.RequestURI())
+		return
 	case errors.Is(err, media.ErrNotFound):
 		s.writeError(w, r, http.StatusNotFound, "media not found", err)
 	case errors.Is(err, media.ErrInvalidFileType):
