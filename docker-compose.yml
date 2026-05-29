@@ -38,6 +38,7 @@ services:
       # API 配置
       MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN:-your_secret_token}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      PRIVATE_RULES: ${PRIVATE_RULES:-}
       APP_LISTEN_ADDR: :8080
       UPLOAD_TIMEOUT_SECONDS: 120
     ports:
@@ -66,6 +67,7 @@ services:
       # API 配置
       MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN:-your_secret_token}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8081}
+      PRIVATE_RULES: ${PRIVATE_RULES:-}
       APP_LISTEN_ADDR: :8080
     ports:
       - "8081:8080"

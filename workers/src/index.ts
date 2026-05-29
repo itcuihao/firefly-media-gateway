@@ -18,6 +18,7 @@ interface Env {
   TELEGRAM_BOTS_CONFIG?: string;  // '{"bot1":{"token":"...","default_group":"group1"},"bot2":{...}}'
   AUTH_TOKEN?: string;             // 可选：Bearer token 鉴权
   MAX_UPLOAD_SIZE?: string;        // 可选：最大上传大小（字节）
+  PRIVATE_RULES?: string;          // 可选：私有规则列表（英文逗号分隔，支持 "*"、"all" 或特定 project/usage）
 }
 
 // Bot 配置
@@ -148,7 +149,7 @@ function getBotConfig(botConfigs: Map<string, BotConfig>, botName: string): BotC
   // 支持不指定 bot 名称时使用第一个可用的
   if (!botName && botConfigs.size > 0) {
     const first = botConfigs.keys().next().value;
-    return botConfigs.get(first) || null;
+    return first ? (botConfigs.get(first) || null) : null;
   }
   return botConfigs.get(botName) || null;
 }
@@ -182,7 +183,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
   // 获取 bot 名称（优先 header，其次 form）
   let botName = request.headers.get('X-Bot-Name') || formData.get('bot') as string || '';
   if (!botName && botConfigs.size === 1) {
-    botName = botConfigs.keys().next().value;
+    botName = botConfigs.keys().next().value || '';
   }
 
   // 获取 group ID（优先 form，其次 bot 配置的默认值）
@@ -231,7 +232,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
       }
     );
 
-    const tgData = await tgResponse.json();
+    const tgData = await tgResponse.json() as any;
 
     if (!tgData.ok) {
       return error(
@@ -262,7 +263,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
       const fileResponse = await fetch(
         `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${doc.file_id}`
       );
-      const fileData = await fileResponse.json();
+      const fileData = await fileResponse.json() as any;
       if (fileData.ok && fileData.result.file_path) {
         response.file_url = `https://api.telegram.org/file/bot${botConfig.token}/${fileData.result.file_path}`;
       }
@@ -338,7 +339,7 @@ async function handleDeleteFile(request: Request, env: Env): Promise<Response> {
     const response = await fetch(
       `https://api.telegram.org/bot${botConfig.token}/deleteMessage?chat_id=${groupId}&message_id=${messageId}`
     );
-    const data = await response.json();
+    const data = await response.json() as any;
 
     const resp: DeleteFileResponse = {
       success: true,
@@ -375,7 +376,7 @@ async function findBotForFile(
       );
       clearTimeout(timeoutId);
 
-      const data = await resp.json();
+      const data = await resp.json() as any;
       if (data.ok) {
         return { botName, botConfig: cfg };
       }
@@ -394,6 +395,54 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const fileId = url.searchParams.get('file_id');
   const debugMode = url.searchParams.get('debug') === 'true';
+
+  if (!fileId) {
+    return error('file_id is required', 'MISSING_FILE_ID', 400);
+  }
+
+  // 鉴权检查（通过 PRIVATE_RULES 统一判定）
+  let isPrivate = false;
+  if (env.AUTH_TOKEN) {
+    const rulesStr = (env.PRIVATE_RULES || '').trim();
+    if (rulesStr) {
+      const rules = rulesStr.split(',').map(s => s.trim()).filter(Boolean);
+      if (rules.includes('*') || rules.includes('all')) {
+        isPrivate = true;
+      } else {
+        const project = url.searchParams.get('project') || request.headers.get('X-Project') || '';
+        const usage = url.searchParams.get('usage') || request.headers.get('X-Usage') || '';
+        if (rules.includes(project) || rules.includes(usage)) {
+          isPrivate = true;
+        }
+      }
+    }
+  }
+
+  if (isPrivate && env.AUTH_TOKEN) {
+    let authorized = false;
+    const authHeader = request.headers.get('Authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      if (token === env.AUTH_TOKEN) {
+        authorized = true;
+      }
+    }
+
+    if (!authorized) {
+      const sig = url.searchParams.get('token_sig');
+      const expiresStr = url.searchParams.get('expires');
+      if (sig && expiresStr) {
+        const expires = parseInt(expiresStr, 10);
+        if (!isNaN(expires) && Date.now() / 1000 <= expires) {
+          authorized = await verifySignature(fileId, expires, sig, env.AUTH_TOKEN);
+        }
+      }
+    }
+
+    if (!authorized) {
+      return error('Unauthorized', 'UNAUTHORIZED', 401);
+    }
+  }
 
   if (!fileId) {
     return error('file_id is required', 'MISSING_FILE_ID', 400);
@@ -431,7 +480,7 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
     const getFileResp = await fetch(
       `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${fileId}`
     );
-    const getFileData = await getFileResp.json();
+    const getFileData = await getFileResp.json() as any;
 
     if (!getFileData.ok) {
       return error(
@@ -448,7 +497,7 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
     const resp: GetFileResponse = {
       success: true,
       file_id: fileId,
-      bot_name: botName,
+      bot_name: botName || '',
       stream_url: `${url.protocol}//${url.host}/stream?file_id=${fileId}`,
       mime_type: mimeType,
       file_size: fileSize,
@@ -475,6 +524,54 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
 async function handleStreamFile(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const fileId = url.searchParams.get('file_id');
+
+  if (!fileId) {
+    return error('file_id is required', 'MISSING_FILE_ID', 400);
+  }
+
+  // 鉴权检查（通过 PRIVATE_RULES 统一判定）
+  let isPrivate = false;
+  if (env.AUTH_TOKEN) {
+    const rulesStr = (env.PRIVATE_RULES || '').trim();
+    if (rulesStr) {
+      const rules = rulesStr.split(',').map(s => s.trim()).filter(Boolean);
+      if (rules.includes('*') || rules.includes('all')) {
+        isPrivate = true;
+      } else {
+        const project = url.searchParams.get('project') || request.headers.get('X-Project') || '';
+        const usage = url.searchParams.get('usage') || request.headers.get('X-Usage') || '';
+        if (rules.includes(project) || rules.includes(usage)) {
+          isPrivate = true;
+        }
+      }
+    }
+  }
+
+  if (isPrivate && env.AUTH_TOKEN) {
+    let authorized = false;
+    const authHeader = request.headers.get('Authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      if (token === env.AUTH_TOKEN) {
+        authorized = true;
+      }
+    }
+
+    if (!authorized) {
+      const sig = url.searchParams.get('token_sig');
+      const expiresStr = url.searchParams.get('expires');
+      if (sig && expiresStr) {
+        const expires = parseInt(expiresStr, 10);
+        if (!isNaN(expires) && Date.now() / 1000 <= expires) {
+          authorized = await verifySignature(fileId, expires, sig, env.AUTH_TOKEN);
+        }
+      }
+    }
+
+    if (!authorized) {
+      return error('Unauthorized', 'UNAUTHORIZED', 401);
+    }
+  }
 
   if (!fileId) {
     return error('file_id is required', 'MISSING_FILE_ID', 400);
@@ -513,7 +610,7 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     const getFileResp = await fetch(
       `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${fileId}`
     );
-    const getFileData = await getFileResp.json();
+    const getFileData = await getFileResp.json() as any;
 
     if (!getFileData.ok) {
       return error(
@@ -549,7 +646,11 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     responseHeaders.set('Accept-Ranges', 'bytes');
     responseHeaders.set('Cache-Control', 'public, max-age=86400');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('X-Served-By-Bot', botName);
+    responseHeaders.set('X-Served-By-Bot', botName || '');
+
+    const ext = extByMIME(mimeType);
+    const filename = `${fileId}${ext}`;
+    responseHeaders.set('Content-Disposition', `inline; filename="${filename}"`);
 
     // 返回状态码（Range 请求返回 206）
     const status = rangeHeader && fileResp.status === 206 ? 206 : fileResp.status;
@@ -606,6 +707,37 @@ function error(message: string, code: string, status = 400): Response {
 }
 
 /**
+ * 校验签名
+ */
+async function verifySignature(fileId: string, expires: number, sig: string, authToken: string): Promise<boolean> {
+  try {
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(authToken);
+    const data = encoder.encode(`${fileId}:${expires}`);
+
+    const key = await crypto.subtle.importKey(
+      'raw',
+      keyData,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+
+    // Convert hex sig to Uint8Array
+    const sigBytes = new Uint8Array(sig.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+
+    return await crypto.subtle.verify(
+      'HMAC',
+      key,
+      sigBytes,
+      data
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
  * OPTIONS 预检请求
  */
 function handleOptions(): Response {
@@ -642,3 +774,15 @@ export default {
       )
     ),
 };
+
+function extByMIME(mimeType: string): string {
+  switch (mimeType.toLowerCase()) {
+    case 'image/jpeg': return '.jpg';
+    case 'image/png': return '.png';
+    case 'image/webp': return '.webp';
+    case 'video/mp4': return '.mp4';
+    case 'video/webm': return '.webm';
+    case 'video/quicktime': return '.mov';
+    default: return '';
+  }
+}

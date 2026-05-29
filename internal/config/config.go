@@ -32,6 +32,7 @@ type Config struct {
 	DatabaseDriver string
 	DatabaseURL    string
 	AuthToken      string
+	PrivateRules   []string
 	PublicBaseURL  string
 
 	// 存储模式配置
@@ -41,7 +42,7 @@ type Config struct {
 	// Direct 模式配置（直接对接 Telegram）
 	TelegramBotToken   string
 	TelegramChatID     string
-	TelegramBotsConfig BotsConfig // 多 bot 配置（JSON 格式）
+	TelegramBotsConfig BotsConfig // 多 bot配置（JSON 格式）
 	UploadTimeout      time.Duration
 
 	// Proxy 模式配置（通过 Worker）
@@ -67,6 +68,7 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		cfg.DatabaseURL = "data/media_gateway.db"
 	}
+	cfg.PrivateRules = parseStringSlice(os.Getenv("PRIVATE_RULES"))
 
 	// 解析多 bot 配置
 	if botsConfigStr := strings.TrimSpace(os.Getenv("TELEGRAM_BOTS_CONFIG")); botsConfigStr != "" {
@@ -171,4 +173,31 @@ func durationFromEnv(key string, defaultSeconds int) time.Duration {
 		return time.Duration(defaultSeconds) * time.Second
 	}
 	return time.Duration(sec) * time.Second
+}
+
+func getBoolEnv(key string, defaultValue bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return defaultValue
+	}
+	return b
+}
+
+func parseStringSlice(v string) []string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	var res []string
+	for _, s := range strings.Split(v, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			res = append(res, s)
+		}
+	}
+	return res
 }

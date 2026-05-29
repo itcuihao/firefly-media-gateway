@@ -244,12 +244,13 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 }
 
 type StreamInfo struct {
-	IsChunked  bool     `json:"isChunked"`
-	StreamURL  string   `json:"streamUrl,omitempty"`
-	TotalBytes int64    `json:"totalBytes"`
-	MIMEType   string   `json:"mimeType"`
-	ChunkCount int      `json:"chunkCount,omitempty"`
-	ChunkURLs  []string `json:"chunkUrls,omitempty"`
+	IsChunked  bool              `json:"isChunked"`
+	StreamURL  string            `json:"streamUrl,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	TotalBytes int64             `json:"totalBytes"`
+	MIMEType   string            `json:"mimeType"`
+	ChunkCount int               `json:"chunkCount,omitempty"`
+	ChunkURLs  []string          `json:"chunkUrls,omitempty"`
 }
 
 // StreamAsset returns stream URLs for an asset
@@ -272,9 +273,19 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 		if err != nil {
 			return StreamInfo{}, err
 		}
+		var headers map[string]string
+		if len(result.Header) > 0 {
+			headers = make(map[string]string)
+			for k, vs := range result.Header {
+				if len(vs) > 0 {
+					headers[k] = vs[0]
+				}
+			}
+		}
 		return StreamInfo{
 			IsChunked:  false,
 			StreamURL:  result.URL,
+			Headers:    headers,
 			TotalBytes: asset.SizeBytes,
 			MIMEType:   asset.MIMEType,
 		}, nil
@@ -287,12 +298,21 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 	}
 
 	chunkURLs := make([]string, 0, len(chunks))
+	var headers map[string]string
 	for _, c := range chunks {
 		cr, err := p.GetAccess(ctx, c.ChunkFileID, asset.ProviderBucketOrChat)
 		if err != nil {
 			return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", err)
 		}
 		chunkURLs = append(chunkURLs, cr.URL)
+		if headers == nil && len(cr.Header) > 0 {
+			headers = make(map[string]string)
+			for k, vs := range cr.Header {
+				if len(vs) > 0 {
+					headers[k] = vs[0]
+				}
+			}
+		}
 	}
 
 	return StreamInfo{
@@ -301,6 +321,7 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 		MIMEType:   asset.MIMEType,
 		ChunkCount: len(chunkURLs),
 		ChunkURLs:  chunkURLs,
+		Headers:    headers,
 	}, nil
 }
 

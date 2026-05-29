@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,14 +23,16 @@ type Server struct {
 	svc              *media.Service
 	authToken        string
 	telegramBotToken string
+	privateRules     []string
 	logger           *log.Logger
 }
 
-func NewServer(svc *media.Service, authToken, telegramBotToken string, logger *log.Logger) *Server {
+func NewServer(svc *media.Service, authToken, telegramBotToken string, privateRules []string, logger *log.Logger) *Server {
 	return &Server{
 		svc:              svc,
 		authToken:        authToken,
 		telegramBotToken: telegramBotToken,
+		privateRules:     privateRules,
 		logger:           logger,
 	}
 }
@@ -39,11 +44,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /debug/ui", s.handleDebugUI)
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/media", s.withAuth(s.handleListMedia))
-	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.withAuth(s.handleGetMedia))
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
-	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.withAuth(s.handleStream))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
 	mux.HandleFunc("GET /api/v1/telegram/chat-ids", s.withAuth(s.handleGetTelegramChatIDs))
+
+	// Media retrieval endpoints handle access control dynamically in serveMediaBinary
+	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.handleGetMedia)
+	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.handleStream)
 
 	return s.withLogging(mux)
 }
@@ -90,7 +97,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, asset)
+	writeJSON(w, http.StatusCreated, s.signAssetURL(asset))
 }
 
 func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +117,7 @@ func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, asset)
+	writeJSON(w, http.StatusOK, s.signAssetURL(asset))
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -130,11 +137,30 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	asset, err := s.svc.GetMeta(r.Context(), mediaID)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	if !s.checkAccess(r, asset) {
+		s.logger.Printf("[AUTH]  %s %s => 401 unauthorized for private asset %q", r.Method, r.URL.RequestURI(), mediaID)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
 	streamInfo, err := s.svc.StreamAsset(r.Context(), mediaID)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
 	}
+
+	ext := extByMIME(asset.MIMEType)
+	filename := asset.ID
+	if ext != "" {
+		filename += ext
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 
 	if streamInfo.IsChunked {
 		s.proxyChunkedMedia(w, r, streamInfo)
@@ -149,6 +175,9 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "failed to build media request", err)
 		return
+	}
+	for k, v := range streamInfo.Headers {
+		req.Header.Set(k, v)
 	}
 	if rangeHeader := strings.TrimSpace(r.Header.Get("Range")); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
@@ -195,6 +224,9 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		if err != nil {
 			s.logger.Printf("[WARN]  build chunk request failed: %v", err)
 			return
+		}
+		for k, v := range streamInfo.Headers {
+			req.Header.Set(k, v)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -365,7 +397,12 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, assets)
+	signedAssets := make([]media.Asset, len(assets))
+	for i, asset := range assets {
+		signedAssets[i] = s.signAssetURL(asset)
+	}
+
+	writeJSON(w, http.StatusOK, signedAssets)
 }
 
 func (s *Server) handleGetTelegramChatIDs(w http.ResponseWriter, r *http.Request) {
@@ -483,4 +520,90 @@ func (s *Server) handleGetTelegramChatIDs(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) generateSignature(mediaID string, expires int64) string {
+	h := hmac.New(sha256.New, []byte(s.authToken))
+	h.Write([]byte(fmt.Sprintf("%s:%d", mediaID, expires)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *Server) isAssetPublic(asset media.Asset) bool {
+	if len(s.privateRules) == 0 {
+		return true
+	}
+	for _, rule := range s.privateRules {
+		if rule == "*" || rule == "all" {
+			return false
+		}
+		if asset.Project == rule || asset.Usage == rule {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) signAssetURL(asset media.Asset) media.Asset {
+	if s.isAssetPublic(asset) {
+		return asset
+	}
+	// Generate a signature valid for 24 hours
+	expires := time.Now().Add(24 * time.Hour).Unix()
+	sig := s.generateSignature(asset.ID, expires)
+
+	sep := "?"
+	if strings.Contains(asset.PublicURL, "?") {
+		sep = "&"
+	}
+	asset.PublicURL = fmt.Sprintf("%s%stoken_sig=%s&expires=%d", asset.PublicURL, sep, sig, expires)
+	return asset
+}
+
+func (s *Server) checkAccess(r *http.Request, asset media.Asset) bool {
+	if s.isAssetPublic(asset) {
+		return true
+	}
+
+	// 1. Check Bearer Token
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	expected := "Bearer " + s.authToken
+	if auth == expected {
+		return true
+	}
+
+	// 2. Check pre-signed URL signature
+	sig := r.URL.Query().Get("token_sig")
+	expiresStr := r.URL.Query().Get("expires")
+	if sig != "" && expiresStr != "" {
+		expires, err := strconv.ParseInt(expiresStr, 10, 64)
+		if err == nil {
+			if time.Now().Unix() <= expires {
+				expectedSig := s.generateSignature(asset.ID, expires)
+				if hmac.Equal([]byte(sig), []byte(expectedSig)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func extByMIME(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "video/quicktime":
+		return ".mov"
+	default:
+		return ""
+	}
 }
