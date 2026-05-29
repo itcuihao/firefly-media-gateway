@@ -42,7 +42,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
-	mux.HandleFunc("GET /debug/ui", s.handleDebugUI)
+
+	// Vue 3 + Naive UI 前端 SPA（嵌入到二进制，由 embed.go 提供）
+	// /debug/ui 无斜杠时重定向，/debug/ui/ 开头统一走 SPA handler
+	mux.HandleFunc("GET /debug/ui", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/debug/ui/", http.StatusMovedPermanently)
+	})
+	mux.Handle("/debug/ui/", http.StripPrefix("/debug/ui", s.frontendHandler()))
+
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/media", s.withAuth(s.handleListMedia))
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
