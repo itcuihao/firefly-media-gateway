@@ -64,13 +64,41 @@ npm run dev
 npm run deploy
 ```
 
+### 5. GitHub Actions 自动部署
+
+仓库已提供 `.github/workflows/worker-deploy.yml`，当 `main` 分支的 `workers/**` 发生变化时会自动部署 Worker，也可以在 GitHub Actions 页面手动触发。
+
+需要在 GitHub 仓库 Secrets 中配置：
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Worker 运行时 secrets 仍通过 Wrangler 管理：
+
+```bash
+wrangler secret put TELEGRAM_BOTS_CONFIG
+wrangler secret put AUTH_TOKEN
+```
+
 ## API 使用
 
 ### POST /upload
 
 上传文件到 Telegram。
 
-**请求方式一：使用 Header 指定 Bot**
+**单 Bot 请求**
+
+单 Bot 配置时不需要传 `bot` 或 `X-Bot-Name`，Worker 会直接使用 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。
+
+```bash
+curl -X POST https://your-worker.workers.dev/upload \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -F "file=@/path/to/image.jpg"
+```
+
+**多 Bot 请求：使用 Header 指定 Bot**
 
 ```bash
 curl -X POST https://your-worker.workers.dev/upload \
@@ -80,7 +108,7 @@ curl -X POST https://your-worker.workers.dev/upload \
   -F "group=-1001234567890"
 ```
 
-**请求方式二：使用 Form 字段**
+**多 Bot 请求：使用 Form 字段指定 Bot**
 
 ```bash
 curl -X POST https://your-worker.workers.dev/upload \
@@ -95,10 +123,10 @@ curl -X POST https://your-worker.workers.dev/upload \
 | 参数 | 位置 | 必填 | 说明 |
 |------|------|------|------|
 | file | form | 是 | 上传的文件 |
-| bot | header/form | 否* | Bot 名称，多 bot 时必填 |
+| bot | header/form | 否 | Bot 名称，单 bot 时不需要，多 bot 时用于指定目标 bot |
 | group | form | 否* | 目标 group ID，不填使用 bot 默认值 |
 
-*单 bot 配置时可省略，多 bot 时必填（或使用第一个配置的 bot）
+*单 bot 时使用 `TELEGRAM_CHAT_ID`。多 bot 时如果不传 `group`，使用该 bot 的 `default_group`。
 
 **成功响应** (201)：
 

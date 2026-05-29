@@ -12,14 +12,14 @@ import (
 
 // Gateway S3 兼容网关
 type Gateway struct {
-	mediaService *media.Service
+	mediaService  *media.Service
 	publicBaseURL string
 }
 
 // NewGateway 创建 S3 网关
 func NewGateway(svc *media.Service, publicBaseURL string) *Gateway {
 	return &Gateway{
-		mediaService: svc,
+		mediaService:  svc,
 		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 	}
 }
@@ -167,13 +167,6 @@ func (g *Gateway) handleGetObject(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	// 获取元数据
-	asset, err := g.mediaService.GetMeta(ctx, assetID)
-	if err != nil {
-		g.writeError(w, "NotFound", "Asset not found", http.StatusNotFound)
-		return
-	}
-
 	// 重定向到实际 URL
 	http.Redirect(w, r, accessURL, http.StatusTemporaryRedirect)
 }
@@ -217,7 +210,7 @@ func (g *Gateway) handleHeadObject(w http.ResponseWriter, r *http.Request, bucke
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", asset.SizeBytes))
 	w.Header().Set("Last-Modified", asset.CreatedAt.UTC().Format(http.TimeFormat))
 	if asset.SHA256 != nil {
-		w.Header().Set("ETag", "\"" + *asset.SHA256 + "\"")
+		w.Header().Set("ETag", "\""+*asset.SHA256+"\"")
 	}
 	w.WriteHeader(http.StatusOK)
 }

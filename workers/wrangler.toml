@@ -19,17 +19,6 @@ compatibility_date = "2024-01-01"
 # AUTH_TOKEN          - 可选：Bearer token 用于 API 鉴权
 # MAX_UPLOAD_SIZE     - 可选：最大上传大小（字节）
 
-[dev]
-port = 8787
-local_protocol = "http"
-
-# Routes configuration (for CORS)
-routes = [
-  { pattern = "/upload", method = "POST" },
-  { pattern = "/get", method = ["GET", "POST"] },
-  { pattern = "/delete", method = ["DELETE", "POST"] }
-]
-
 # 如果需要 D1 存储元数据（当前方案不需要）
 # [[d1_databases]]
 # binding = "DB"

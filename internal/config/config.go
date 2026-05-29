@@ -19,8 +19,8 @@ const (
 
 // BotConfig 单个 Bot 配置
 type BotConfig struct {
-	Token         string  `json:"token"`
-	DefaultGroup  string  `json:"default_group,omitempty"`
+	Token        string `json:"token"`
+	DefaultGroup string `json:"default_group,omitempty"`
 }
 
 // BotsConfig 多 Bot 配置
@@ -28,24 +28,25 @@ type BotsConfig map[string]BotConfig
 
 type Config struct {
 	// 服务配置
-	ListenAddr    string
-	DatabaseURL   string
-	AuthToken     string
-	PublicBaseURL string
+	ListenAddr     string
+	DatabaseDriver string
+	DatabaseURL    string
+	AuthToken      string
+	PublicBaseURL  string
 
 	// 存储模式配置
-	StorageMode   StorageMode
-	ProviderDefault string // "tg" (telegram) or "r2"
+	StorageMode     StorageMode
+	ProviderDefault string // provider key, for example "tg", "r2", "discord", "huggingface"
 
 	// Direct 模式配置（直接对接 Telegram）
-	TelegramBotToken string
-	TelegramChatID   string
+	TelegramBotToken   string
+	TelegramChatID     string
 	TelegramBotsConfig BotsConfig // 多 bot 配置（JSON 格式）
-	UploadTimeout    time.Duration
+	UploadTimeout      time.Duration
 
 	// Proxy 模式配置（通过 Worker）
-	WorkerBaseURL    string // Worker 服务 URL
-	WorkerAuthToken  string // Worker 鉴权 token
+	WorkerBaseURL   string // Worker 服务 URL
+	WorkerAuthToken string // Worker 鉴权 token
 }
 
 func Load() (Config, error) {
@@ -62,6 +63,10 @@ func Load() (Config, error) {
 		WorkerBaseURL:    strings.TrimSpace(os.Getenv("WORKER_BASE_URL")),
 		WorkerAuthToken:  strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN")),
 	}
+	cfg.DatabaseDriver = resolveDatabaseDriver(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")), cfg.DatabaseURL)
+	if cfg.DatabaseURL == "" {
+		cfg.DatabaseURL = "data/media_gateway.db"
+	}
 
 	// 解析多 bot 配置
 	if botsConfigStr := strings.TrimSpace(os.Getenv("TELEGRAM_BOTS_CONFIG")); botsConfigStr != "" {
@@ -73,14 +78,14 @@ func Load() (Config, error) {
 	}
 
 	// 验证必填配置
-	if cfg.DatabaseURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	if cfg.DatabaseDriver != "postgres" && cfg.DatabaseDriver != "sqlite" {
+		return Config{}, fmt.Errorf("DATABASE_DRIVER must be postgres or sqlite")
 	}
 	if cfg.AuthToken == "" {
 		return Config{}, fmt.Errorf("MEDIA_GATEWAY_TOKEN is required")
 	}
-	if cfg.ProviderDefault != "tg" && cfg.ProviderDefault != "r2" {
-		return Config{}, fmt.Errorf("MEDIA_PROVIDER_DEFAULT must be tg or r2")
+	if cfg.ProviderDefault == "" {
+		return Config{}, fmt.Errorf("MEDIA_PROVIDER_DEFAULT is required")
 	}
 
 	// 验证存储模式配置
@@ -111,6 +116,22 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func resolveDatabaseDriver(driver, databaseURL string) string {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver != "" {
+		return driver
+	}
+
+	dsn := strings.ToLower(strings.TrimSpace(databaseURL))
+	if dsn == "" {
+		return "sqlite"
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		return "postgres"
+	}
+	return "sqlite"
 }
 
 // IsProxyMode 判断是否为代理模式

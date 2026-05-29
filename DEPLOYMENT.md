@@ -123,12 +123,12 @@ docker build -t firefly-media-gateway .
 
 # 运行
 docker run -d \
-  -e DATABASE_URL=postgres://user:pass@host:5432/dbname \
   -e STORAGE_MODE=proxy \
   -e WORKER_BASE_URL=https://your-worker.workers.dev \
   -e WORKER_AUTH_TOKEN=your_worker_token \
   -e MEDIA_GATEWAY_TOKEN=your_api_token \
   -e PUBLIC_BASE_URL=https://your-api.com \
+  -v media_gateway_data:/app/data \
   -p 8080:8080 \
   firefly-media-gateway
 ```
@@ -137,7 +137,8 @@ docker run -d \
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `DATABASE_URL` | 是 | PostgreSQL 连接字符串 |
+| `DATABASE_DRIVER` | 否 | `sqlite` 或 `postgres`，不填时根据 `DATABASE_URL` 自动判断 |
+| `DATABASE_URL` | 否 | 不填默认 SQLite: `data/media_gateway.db`；PostgreSQL 使用连接字符串 |
 | `STORAGE_MODE` | 是 | 设为 `proxy` |
 | `WORKER_BASE_URL` | 是 | Worker 服务 URL |
 | `WORKER_AUTH_TOKEN` | 是 | Worker 鉴权 token |
@@ -168,7 +169,8 @@ GET    /s3/{bucket}                              # 列举
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `DATABASE_URL` | 是 | PostgreSQL 连接字符串 |
+| `DATABASE_DRIVER` | 否 | `sqlite` 或 `postgres`，不填时根据 `DATABASE_URL` 自动判断 |
+| `DATABASE_URL` | 否 | 不填默认 SQLite: `data/media_gateway.db`；PostgreSQL 使用连接字符串 |
 | `STORAGE_MODE` | 是 | 设为 `direct` |
 | `TELEGRAM_BOTS_CONFIG` | 是* | JSON 格式多 bot 配置 |
 | `TELEGRAM_BOT_TOKEN` | 是* | 单 bot token（兼容） |
@@ -182,12 +184,12 @@ GET    /s3/{bucket}                              # 列举
 
 ```bash
 docker run -d \
-  -e DATABASE_URL=postgres://user:pass@host:5432/dbname \
   -e STORAGE_MODE=direct \
   -e TELEGRAM_BOT_TOKEN=123456:ABC-DEF \
   -e TELEGRAM_CHAT_ID=-1001234567890 \
   -e MEDIA_GATEWAY_TOKEN=secret \
   -e PUBLIC_BASE_URL=https://api.example.com \
+  -v media_gateway_data:/app/data \
   -p 8080:8080 \
   firefly-media-gateway
 ```
@@ -196,11 +198,11 @@ docker run -d \
 
 ```bash
 docker run -d \
-  -e DATABASE_URL=postgres://user:pass@host:5432/dbname \
   -e STORAGE_MODE=direct \
   -e TELEGRAM_BOTS_CONFIG='{"bot1":{"token":"xxx","default_group":"-100xxx"},"bot2":{"token":"yyy","default_group":"-100yyy"}}' \
   -e MEDIA_GATEWAY_TOKEN=secret \
   -e PUBLIC_BASE_URL=https://api.example.com \
+  -v media_gateway_data:/app/data \
   -p 8080:8080 \
   firefly-media-gateway
 ```
@@ -213,7 +215,9 @@ docker run -d \
 # 使用 Docker Compose
 docker-compose -f docker-compose.yml up -d postgres
 
-# 运行迁移
+# SQLite 为默认数据库，启动时自动建表。
+
+# PostgreSQL 需要运行迁移
 psql $DATABASE_URL < migrations/001_init.sql
 ```
 

@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	maxImageSizeBytes      int64 = 10 * 1024 * 1024   // 10MB for images
-	maxVideoSizeBytes      int64 = 50 * 1024 * 1024   // 50MB Telegram limit
-	maxVideoSizeBytesChunk int64 = 200 * 1024 * 1024  // 200MB for members with chunking
-	chunkSize              int64 = 50 * 1024 * 1024    // 50MB per chunk
+	maxImageSizeBytes      int64 = 10 * 1024 * 1024  // 10MB for images
+	maxVideoSizeBytes      int64 = 50 * 1024 * 1024  // 50MB Telegram limit
+	maxVideoSizeBytesChunk int64 = 200 * 1024 * 1024 // 200MB for members with chunking
+	chunkSize              int64 = 50 * 1024 * 1024  // 50MB per chunk
 )
 
 type UploadRequest struct {
@@ -148,6 +148,7 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 	// Split into chunks
 	chunkCount := int((sizeBytes + chunkSize - 1) / chunkSize)
 	chunkIDs := make([]string, 0, chunkCount)
+	var providerBucketOrChat *string
 
 	for i := 0; i < chunkCount; i++ {
 		start := int64(i) * chunkSize
@@ -172,6 +173,9 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 		}
 
 		chunkIDs = append(chunkIDs, upResult.ProviderFileID)
+		if providerBucketOrChat == nil {
+			providerBucketOrChat = upResult.ProviderBucketOrChat
+		}
 	}
 
 	assetID := newUUID()
@@ -179,18 +183,19 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
-		ID:             assetID,
-		Provider:       p.Name(),
-		ProviderFileID: "", // No single file_id for chunked assets
-		PublicURL:      publicURL,
-		MIMEType:       mimeType,
-		SizeBytes:      chunkSize, // Size per chunk (for compatibility)
-		SHA256:         &sha,
-		Project:        strings.TrimSpace(req.Project),
-		Usage:          req.Usage,
-		IsChunked:      true,
-		ChunkIDs:       chunkIDs,
-		TotalBytes:     sizeBytes,
+		ID:                   assetID,
+		Provider:             p.Name(),
+		ProviderFileID:       "", // No single file_id for chunked assets
+		ProviderBucketOrChat: providerBucketOrChat,
+		PublicURL:            publicURL,
+		MIMEType:             mimeType,
+		SizeBytes:            chunkSize, // Size per chunk (for compatibility)
+		SHA256:               &sha,
+		Project:              strings.TrimSpace(req.Project),
+		Usage:                req.Usage,
+		IsChunked:            true,
+		ChunkIDs:             chunkIDs,
+		TotalBytes:           sizeBytes,
 	})
 	if err != nil {
 		return Asset{}, fmt.Errorf("save media metadata failed: %w", err)
@@ -255,12 +260,12 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 			return StreamInfo{}, err
 		}
 		return StreamInfo{
-			IsChunked:   false,
-			StreamURL:   url,
-			TotalBytes:  asset.TotalBytes,
-			MIMEType:    asset.MIMEType,
-			ChunkCount:  0,
-			ChunkURLs:   nil,
+			IsChunked:  false,
+			StreamURL:  url,
+			TotalBytes: asset.TotalBytes,
+			MIMEType:   asset.MIMEType,
+			ChunkCount: 0,
+			ChunkURLs:  nil,
 		}, nil
 	}
 
@@ -275,22 +280,22 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 	}
 
 	return StreamInfo{
-		IsChunked:   true,
-		StreamURL:   "", // No single URL for chunked
-		TotalBytes:  asset.TotalBytes,
-		MIMEType:    asset.MIMEType,
-		ChunkCount:  len(chunkURLs),
-		ChunkURLs:   chunkURLs,
+		IsChunked:  true,
+		StreamURL:  "", // No single URL for chunked
+		TotalBytes: asset.TotalBytes,
+		MIMEType:   asset.MIMEType,
+		ChunkCount: len(chunkURLs),
+		ChunkURLs:  chunkURLs,
 	}, nil
 }
 
 type StreamInfo struct {
-	IsChunked   bool     `json:"isChunked"`
-	StreamURL   string   `json:"streamUrl,omitempty"`
-	TotalBytes  int64    `json:"totalBytes"`
-	MIMEType    string   `json:"mimeType"`
-	ChunkCount  int      `json:"chunkCount,omitempty"`
-	ChunkURLs   []string `json:"chunkUrls,omitempty"`
+	IsChunked  bool     `json:"isChunked"`
+	StreamURL  string   `json:"streamUrl,omitempty"`
+	TotalBytes int64    `json:"totalBytes"`
+	MIMEType   string   `json:"mimeType"`
+	ChunkCount int      `json:"chunkCount,omitempty"`
+	ChunkURLs  []string `json:"chunkUrls,omitempty"`
 }
 
 func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
@@ -306,7 +311,13 @@ func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
 	if !ok {
 		return Asset{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
 	}
-	if err := p.Delete(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat); err != nil {
+	if asset.IsChunked {
+		for _, chunkID := range asset.ChunkIDs {
+			if err := p.Delete(ctx, chunkID, asset.ProviderBucketOrChat); err != nil {
+				return Asset{}, fmt.Errorf("delete chunk from provider %q failed: %w", p.Name(), err)
+			}
+		}
+	} else if err := p.Delete(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat); err != nil {
 		return Asset{}, fmt.Errorf("delete from provider %q failed: %w", p.Name(), err)
 	}
 

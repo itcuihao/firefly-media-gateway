@@ -1,3 +1,6 @@
 .gocache/
 .gomodcache/
 .env
+data/
+workers/node_modules/
+workers/.wrangler/

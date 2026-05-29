@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"io"
+	"net/http"
 )
 
 type UploadInput struct {
@@ -16,9 +17,14 @@ type UploadResult struct {
 	ProviderBucketOrChat *string
 }
 
+type AccessResult struct {
+	URL     string
+	Header  http.Header
+}
+
 type StorageProvider interface {
 	Name() string
 	Upload(ctx context.Context, in UploadInput) (UploadResult, error)
 	Delete(ctx context.Context, providerFileID string, bucketOrChat *string) error
-	GetAccessURL(ctx context.Context, providerFileID string, bucketOrChat *string) (string, error)
+	GetAccess(ctx context.Context, providerFileID string, bucketOrChat *string) (AccessResult, error)
 }

@@ -97,8 +97,8 @@ func (p *WorkerProvider) Delete(ctx context.Context, providerFileID string, buck
 	return nil
 }
 
-// GetAccessURL 获取文件访问 URL（使用 Worker /get 端点）
-func (p *WorkerProvider) GetAccessURL(ctx context.Context, providerFileID string, _ *string) (string, error) {
+// GetAccess 获取文件访问 URL（使用 Worker /get 端点）
+func (p *WorkerProvider) GetAccess(ctx context.Context, providerFileID string, _ *string) (AccessResult, error) {
 	// 调用 Worker 的 /get 端点获取 stream_url
 	params := url.Values{}
 	params.Set("file_id", providerFileID)
@@ -106,31 +106,36 @@ func (p *WorkerProvider) GetAccessURL(ctx context.Context, providerFileID string
 	reqURL := fmt.Sprintf("%s/get?%s", p.baseURL, params.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("build get request: %w", err)
+		return AccessResult{}, fmt.Errorf("build get request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+p.authToken)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("call Worker get: %w", err)
+		return AccessResult{}, fmt.Errorf("call Worker get: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("Worker get status=%d body=%s", resp.StatusCode, string(b))
+		return AccessResult{}, fmt.Errorf("Worker get status=%d body=%s", resp.StatusCode, string(b))
 	}
 
 	var result workerGetResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode get response: %w", err)
+		return AccessResult{}, fmt.Errorf("decode get response: %w", err)
 	}
 	if !result.Success {
-		return "", fmt.Errorf("Worker get failed: %s", result.Error)
+		return AccessResult{}, fmt.Errorf("Worker get failed: %s", result.Error)
 	}
 
-	// 返回 Worker stream URL（不包含 TG token）
-	return result.StreamURL, nil
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+p.authToken)
+
+	return AccessResult{
+		URL:    result.StreamURL,
+		Header: header,
+	}, nil
 }
 
 type workerUploadResponse struct {

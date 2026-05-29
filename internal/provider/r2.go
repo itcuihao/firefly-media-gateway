@@ -23,6 +23,6 @@ func (p *R2Provider) Delete(_ context.Context, _ string, _ *string) error {
 	return nil
 }
 
-func (p *R2Provider) GetAccessURL(_ context.Context, _ string, _ *string) (string, error) {
-	return "", fmt.Errorf("r2 provider not enabled in MVP")
+func (p *R2Provider) GetAccess(_ context.Context, _ string, _ *string) (AccessResult, error) {
+	return AccessResult{}, fmt.Errorf("r2 provider not enabled in MVP")
 }

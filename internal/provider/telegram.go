@@ -99,36 +99,38 @@ func (p *TelegramProvider) Delete(_ context.Context, _ string, _ *string) error 
 	return nil
 }
 
-func (p *TelegramProvider) GetAccessURL(ctx context.Context, providerFileID string, _ *string) (string, error) {
+func (p *TelegramProvider) GetAccess(ctx context.Context, providerFileID string, _ *string) (AccessResult, error) {
 	payload := url.Values{}
 	payload.Set("file_id", providerFileID)
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?%s", p.botToken, payload.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", fmt.Errorf("build getFile request: %w", err)
+		return AccessResult{}, fmt.Errorf("build getFile request: %w", err)
 	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("call getFile: %w", err)
+		return AccessResult{}, fmt.Errorf("call getFile: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("getFile status=%d body=%s", resp.StatusCode, string(b))
+		return AccessResult{}, fmt.Errorf("getFile status=%d body=%s", resp.StatusCode, string(b))
 	}
 
 	var result getFileResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode getFile response: %w", err)
+		return AccessResult{}, fmt.Errorf("decode getFile response: %w", err)
 	}
 	if !result.OK || result.Result.FilePath == "" {
-		return "", fmt.Errorf("getFile failed: %s", result.Description)
+		return AccessResult{}, fmt.Errorf("getFile failed: %s", result.Description)
 	}
 
-	return fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", p.botToken, path.Clean(result.Result.FilePath)), nil
+	return AccessResult{
+		URL: fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", p.botToken, path.Clean(result.Result.FilePath)),
+	}, nil
 }
 
 type sendDocumentResponse struct {

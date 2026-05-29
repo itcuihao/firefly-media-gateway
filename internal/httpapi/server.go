@@ -39,7 +39,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /debug/ui", s.handleDebugUI)
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/media", s.withAuth(s.handleListMedia))
-	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.handleGetMedia)
+	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.withAuth(s.handleGetMedia))
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.withAuth(s.handleStream))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
@@ -94,19 +94,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
-	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
-	if mediaID == "" {
-		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
-		return
-	}
-
-	accessURL, err := s.svc.ResolveAccessURL(r.Context(), mediaID)
-	if err != nil {
-		s.writeDomainError(w, r, err)
-		return
-	}
-
-	http.Redirect(w, r, accessURL, http.StatusFound)
+	s.serveMediaBinary(w, r)
 }
 
 func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
@@ -132,13 +120,115 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.serveMediaBinary(w, r)
+}
+
+func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
+	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	if mediaID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
+		return
+	}
+
 	streamInfo, err := s.svc.StreamAsset(r.Context(), mediaID)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, streamInfo)
+	if streamInfo.IsChunked {
+		s.proxyChunkedMedia(w, r, streamInfo)
+		return
+	}
+
+	s.proxySingleMedia(w, r, streamInfo)
+}
+
+func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, streamInfo.StreamURL, nil)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "failed to build media request", err)
+		return
+	}
+	if rangeHeader := strings.TrimSpace(r.Header.Get("Range")); rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, "failed to fetch media", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyMediaHeaders(w.Header(), resp.Header)
+	if w.Header().Get("Content-Type") == "" && streamInfo.MIMEType != "" {
+		w.Header().Set("Content-Type", streamInfo.MIMEType)
+	}
+	if w.Header().Get("Accept-Ranges") == "" {
+		w.Header().Set("Accept-Ranges", "bytes")
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Printf("[WARN]  stream media failed: %v", err)
+	}
+}
+
+func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
+	if strings.TrimSpace(r.Header.Get("Range")) != "" {
+		s.writeError(w, r, http.StatusRequestedRangeNotSatisfiable, "range is not supported for chunked media yet", nil)
+		return
+	}
+
+	if streamInfo.MIMEType != "" {
+		w.Header().Set("Content-Type", streamInfo.MIMEType)
+	}
+	if streamInfo.TotalBytes > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
+	}
+	w.Header().Set("Cache-Control", "private, max-age=0")
+	w.WriteHeader(http.StatusOK)
+
+	for _, chunkURL := range streamInfo.ChunkURLs {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, chunkURL, nil)
+		if err != nil {
+			s.logger.Printf("[WARN]  build chunk request failed: %v", err)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			s.logger.Printf("[WARN]  fetch chunk failed: %v", err)
+			return
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			s.logger.Printf("[WARN]  fetch chunk returned status=%d", resp.StatusCode)
+			return
+		}
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			resp.Body.Close()
+			s.logger.Printf("[WARN]  write chunk failed: %v", err)
+			return
+		}
+		resp.Body.Close()
+	}
+}
+
+func copyMediaHeaders(dst, src http.Header) {
+	for _, key := range []string{
+		"Content-Type",
+		"Content-Length",
+		"Content-Range",
+		"Accept-Ranges",
+		"ETag",
+		"Last-Modified",
+		"Cache-Control",
+	} {
+		if value := src.Get(key); value != "" {
+			dst.Set(key, value)
+		}
+	}
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {

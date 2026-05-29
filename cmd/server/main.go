@@ -4,15 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "modernc.org/sqlite"
 
 	"firefly-media-gateway/internal/config"
 	"firefly-media-gateway/internal/httpapi"
@@ -30,74 +33,39 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	db, repo, err := openRepository(context.Background(), cfg)
 	if err != nil {
-		logger.Fatalf("open postgres: %v", err)
+		logger.Fatalf("open repository: %v", err)
 	}
 	defer db.Close()
-
-	if err := storage.Ping(context.Background(), db); err != nil {
-		logger.Fatalf("postgres not ready: %v", err)
+	providers, err := buildProviders(cfg)
+	if err != nil {
+		logger.Fatalf("build providers: %v", err)
 	}
 
-	repo := storage.NewPostgresRepository(db)
-	providers := map[string]provider.StorageProvider{}
+	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
+	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, logger)
 
-	// 根据存储模式配置 provider
-	switch cfg.StorageMode {
-	case config.StorageModeProxy:
-		// Proxy 模式：使用 Worker
-		workerProvider := provider.NewWorkerProvider(cfg.WorkerBaseURL, cfg.WorkerAuthToken)
-		providers[workerProvider.Name()] = workerProvider
-		providers["tg"] = workerProvider // 兼容现有代码
-	case config.StorageModeDirect:
-		// Direct 模式：直接对接 Telegram
-		if cfg.HasMultiBots() {
-			// 多 bot 配置：使用第一个作为默认
-			for botName, botCfg := range cfg.TelegramBotsConfig {
-				tgProvider := provider.NewTelegramProviderWithConfig(botCfg.Token, botCfg.DefaultGroup, cfg.UploadTimeout)
-				providers[botName] = tgProvider
-				// 如果没有指定默认，使用第一个
-				if providers["tg"] == nil {
-					providers["tg"] = tgProvider
-				}
-			}
+	// 创建 S3 Gateway（可选）
+	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)
+
+	// 组合处理器
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/s3/") {
+			s3Gateway.Handler().ServeHTTP(w, r)
 		} else {
-			// 单 bot 配置
-			tgProvider := provider.NewTelegramProvider(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.UploadTimeout)
-			providers[tgProvider.Name()] = tgProvider
+			h.Handler().ServeHTTP(w, r)
 		}
+	})
 
-		// R2 provider（如果启用）
-		if cfg.ProviderDefault == "r2" {
-			r2Provider := provider.NewR2Provider()
-			providers[r2Provider.Name()] = r2Provider
-		}
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-
-		svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
-		h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, logger)
-
-		// 创建 S3 Gateway（可选）
-		s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)
-
-		// 组合处理器
-		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/s3/") {
-				s3Gateway.Handler().ServeHTTP(w, r)
-			} else {
-				h.Handler().ServeHTTP(w, r)
-			}
-		})
-
-		srv := &http.Server{
-			Addr:              cfg.ListenAddr,
-			Handler:           handler,
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      120 * time.Second,
-			IdleTimeout:       120 * time.Second,
-		}
 
 	go func() {
 		logger.Printf("server listening on %s", cfg.ListenAddr)
@@ -116,4 +84,88 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Printf("graceful shutdown failed: %v", err)
 	}
+}
+
+func openRepository(ctx context.Context, cfg config.Config) (*sql.DB, media.Repository, error) {
+	switch cfg.DatabaseDriver {
+	case "postgres":
+		db, err := sql.Open("pgx", cfg.DatabaseURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open postgres: %w", err)
+		}
+		if err := storage.Ping(ctx, db); err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("postgres not ready: %w", err)
+		}
+		return db, storage.NewPostgresRepository(db), nil
+	case "sqlite":
+		if err := ensureSQLiteDir(cfg.DatabaseURL); err != nil {
+			return nil, nil, err
+		}
+		db, err := sql.Open("sqlite", cfg.DatabaseURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open sqlite: %w", err)
+		}
+		db.SetMaxOpenConns(1)
+		if err := storage.Ping(ctx, db); err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("sqlite not ready: %w", err)
+		}
+		if err := storage.EnsureSQLiteSchema(ctx, db); err != nil {
+			db.Close()
+			return nil, nil, err
+		}
+		return db, storage.NewSQLiteRepository(db), nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported database driver %q", cfg.DatabaseDriver)
+	}
+}
+
+func ensureSQLiteDir(databaseURL string) error {
+	if databaseURL == "" || strings.HasPrefix(databaseURL, "file:") || databaseURL == ":memory:" {
+		return nil
+	}
+	dir := filepath.Dir(databaseURL)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create sqlite directory: %w", err)
+	}
+	return nil
+}
+
+func buildProviders(cfg config.Config) (map[string]provider.StorageProvider, error) {
+	providers := map[string]provider.StorageProvider{}
+
+	switch cfg.StorageMode {
+	case config.StorageModeProxy:
+		workerProvider := provider.NewWorkerProvider(cfg.WorkerBaseURL, cfg.WorkerAuthToken)
+		providers["tg"] = workerProvider // 兼容现有配置
+	case config.StorageModeDirect:
+		if cfg.HasMultiBots() {
+			for botName, botCfg := range cfg.TelegramBotsConfig {
+				tgProvider := provider.NewTelegramProviderWithConfig(botCfg.Token, botCfg.DefaultGroup, cfg.UploadTimeout)
+				providers[botName] = tgProvider
+				if providers["tg"] == nil {
+					providers["tg"] = tgProvider
+				}
+			}
+		} else if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+			tgProvider := provider.NewTelegramProvider(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.UploadTimeout)
+			providers[tgProvider.Name()] = tgProvider
+		}
+
+		if cfg.ProviderDefault == "r2" {
+			r2Provider := provider.NewR2Provider()
+			providers[r2Provider.Name()] = r2Provider
+		}
+	default:
+		return nil, fmt.Errorf("unsupported storage mode %q", cfg.StorageMode)
+	}
+
+	if providers[cfg.ProviderDefault] == nil {
+		return nil, fmt.Errorf("provider %q is not registered", cfg.ProviderDefault)
+	}
+	return providers, nil
 }

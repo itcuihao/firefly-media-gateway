@@ -1,6 +1,11 @@
 package media
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"firefly-media-gateway/internal/provider"
+)
 
 func TestNormalizeAndValidateMIME(t *testing.T) {
 	tests := []struct {
@@ -54,4 +59,83 @@ func TestNormalizeAndValidateMIME(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteChunkedDeletesEveryChunk(t *testing.T) {
+	location := "bucket-a"
+	repo := &fakeRepository{
+		asset: Asset{
+			ID:                   "asset-1",
+			Provider:             "fake",
+			ProviderBucketOrChat: &location,
+			Status:               StatusActive,
+			IsChunked:            true,
+			ChunkIDs:             []string{"chunk-1", "chunk-2"},
+		},
+	}
+	p := &fakeProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	asset, err := svc.Delete(context.Background(), "asset-1")
+	if err != nil {
+		t.Fatalf("delete chunked asset: %v", err)
+	}
+	if asset.Status != StatusDeleted {
+		t.Fatalf("want deleted status, got %q", asset.Status)
+	}
+	if len(p.deletedIDs) != 2 {
+		t.Fatalf("want 2 deleted chunks, got %d", len(p.deletedIDs))
+	}
+	if p.deletedIDs[0] != "chunk-1" || p.deletedIDs[1] != "chunk-2" {
+		t.Fatalf("unexpected deleted chunks: %#v", p.deletedIDs)
+	}
+}
+
+type fakeRepository struct {
+	asset Asset
+}
+
+func (r *fakeRepository) Create(context.Context, CreateAssetInput) (Asset, error) {
+	return Asset{}, nil
+}
+
+func (r *fakeRepository) GetByID(_ context.Context, id string) (Asset, error) {
+	if r.asset.ID != id {
+		return Asset{}, ErrNotFound
+	}
+	return r.asset, nil
+}
+
+func (r *fakeRepository) MarkDeleted(_ context.Context, id string) (Asset, error) {
+	if r.asset.ID != id {
+		return Asset{}, ErrNotFound
+	}
+	r.asset.Status = StatusDeleted
+	return r.asset, nil
+}
+
+func (r *fakeRepository) List(context.Context, int, int) ([]Asset, error) {
+	return nil, nil
+}
+
+type fakeProvider struct {
+	name       string
+	deletedIDs []string
+}
+
+func (p *fakeProvider) Name() string {
+	return p.name
+}
+
+func (p *fakeProvider) Upload(context.Context, provider.UploadInput) (provider.UploadResult, error) {
+	return provider.UploadResult{}, nil
+}
+
+func (p *fakeProvider) Delete(_ context.Context, providerFileID string, _ *string) error {
+	p.deletedIDs = append(p.deletedIDs, providerFileID)
+	return nil
+}
+
+func (p *fakeProvider) GetAccessURL(context.Context, string, *string) (string, error) {
+	return "", nil
 }
