@@ -48,10 +48,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
 	mux.HandleFunc("GET /api/v1/telegram/chat-ids", s.withAuth(s.handleGetTelegramChatIDs))
-
 	// Media retrieval endpoints handle access control dynamically in serveMediaBinary
 	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.handleGetMedia)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.handleStream)
+
+	// Provider verification endpoints
+	mux.HandleFunc("POST /api/v1/provider/telegram/verify", s.withAuth(s.handleTelegramVerify))
+	mux.HandleFunc("POST /api/v1/provider/telegram/chat-ids", s.withAuth(s.handleTelegramChatIDsPost))
+	mux.HandleFunc("POST /api/v1/provider/discord/verify", s.withAuth(s.handleDiscordVerify))
+	mux.HandleFunc("POST /api/v1/provider/discord/guilds", s.withAuth(s.handleDiscordGuilds))
 
 	return s.withLogging(mux)
 }
