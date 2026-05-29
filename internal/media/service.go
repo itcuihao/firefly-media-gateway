@@ -89,7 +89,6 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 
 	// Check if chunking is needed
 	if sizeBytes <= chunkSize || !req.IsMember {
-		// Single file upload
 		return s.uploadSingle(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
 	}
 
@@ -128,7 +127,6 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 		Project:              strings.TrimSpace(req.Project),
 		Usage:                req.Usage,
 		IsChunked:            false,
-		TotalBytes:           sizeBytes,
 	})
 	if err != nil {
 		return Asset{}, fmt.Errorf("save media metadata failed: %w", err)
@@ -139,15 +137,13 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 
 // uploadChunked handles chunked upload for large videos
 func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider, tmpFile *os.File, req UploadRequest, mimeType string, sizeBytes int64, shaHex string) (Asset, error) {
-	// Read entire file into memory
 	data, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
 		return Asset{}, fmt.Errorf("read temp file: %w", err)
 	}
 
-	// Split into chunks
 	chunkCount := int((sizeBytes + chunkSize - 1) / chunkSize)
-	chunkIDs := make([]string, 0, chunkCount)
+	chunks := make([]Chunk, 0, chunkCount)
 	var providerBucketOrChat *string
 
 	for i := 0; i < chunkCount; i++ {
@@ -167,12 +163,13 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 			Reader:   chunkReader,
 		})
 		if err != nil {
-			// Clean up already uploaded chunks
-			// TODO: delete already uploaded chunks on failure
 			return Asset{}, fmt.Errorf("upload chunk %d failed: %w", i, err)
 		}
 
-		chunkIDs = append(chunkIDs, upResult.ProviderFileID)
+		chunks = append(chunks, Chunk{
+			ChunkIndex:  i,
+			ChunkFileID: upResult.ProviderFileID,
+		})
 		if providerBucketOrChat == nil {
 			providerBucketOrChat = upResult.ProviderBucketOrChat
 		}
@@ -185,20 +182,26 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
 		ID:                   assetID,
 		Provider:             p.Name(),
-		ProviderFileID:       "", // No single file_id for chunked assets
+		ProviderFileID:       "",
 		ProviderBucketOrChat: providerBucketOrChat,
 		PublicURL:            publicURL,
 		MIMEType:             mimeType,
-		SizeBytes:            chunkSize, // Size per chunk (for compatibility)
+		SizeBytes:            sizeBytes,
 		SHA256:               &sha,
 		Project:              strings.TrimSpace(req.Project),
 		Usage:                req.Usage,
 		IsChunked:            true,
-		ChunkIDs:             chunkIDs,
-		TotalBytes:           sizeBytes,
 	})
 	if err != nil {
 		return Asset{}, fmt.Errorf("save media metadata failed: %w", err)
+	}
+
+	// Set assetID on chunks before saving
+	for i := range chunks {
+		chunks[i].AssetID = assetID
+	}
+	if err := s.repo.SaveChunks(ctx, assetID, chunks); err != nil {
+		return Asset{}, fmt.Errorf("save chunks failed: %w", err)
 	}
 
 	return asset, nil
@@ -233,12 +236,23 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 	if !ok {
 		return "", fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
 	}
-	return p.GetAccessURL(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+	result, err := p.GetAccess(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+	if err != nil {
+		return "", err
+	}
+	return result.URL, nil
+}
+
+type StreamInfo struct {
+	IsChunked  bool     `json:"isChunked"`
+	StreamURL  string   `json:"streamUrl,omitempty"`
+	TotalBytes int64    `json:"totalBytes"`
+	MIMEType   string   `json:"mimeType"`
+	ChunkCount int      `json:"chunkCount,omitempty"`
+	ChunkURLs  []string `json:"chunkUrls,omitempty"`
 }
 
 // StreamAsset returns stream URLs for an asset
-// For single files: returns single URL
-// For chunked files: returns chunk URLs in order
 func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error) {
 	asset, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -254,48 +268,40 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 	}
 
 	if !asset.IsChunked {
-		// Single file
-		url, err := p.GetAccessURL(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+		result, err := p.GetAccess(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
 		if err != nil {
 			return StreamInfo{}, err
 		}
 		return StreamInfo{
 			IsChunked:  false,
-			StreamURL:  url,
-			TotalBytes: asset.TotalBytes,
+			StreamURL:  result.URL,
+			TotalBytes: asset.SizeBytes,
 			MIMEType:   asset.MIMEType,
-			ChunkCount: 0,
-			ChunkURLs:  nil,
 		}, nil
 	}
 
-	// Chunked file - get URLs for all chunks
-	chunkURLs := make([]string, 0, len(asset.ChunkIDs))
-	for _, chunkID := range asset.ChunkIDs {
-		url, err := p.GetAccessURL(ctx, chunkID, asset.ProviderBucketOrChat)
+	// Chunked file - get chunks then resolve URLs
+	chunks, err := s.repo.GetChunks(ctx, id)
+	if err != nil {
+		return StreamInfo{}, fmt.Errorf("get chunks: %w", err)
+	}
+
+	chunkURLs := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		cr, err := p.GetAccess(ctx, c.ChunkFileID, asset.ProviderBucketOrChat)
 		if err != nil {
 			return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", err)
 		}
-		chunkURLs = append(chunkURLs, url)
+		chunkURLs = append(chunkURLs, cr.URL)
 	}
 
 	return StreamInfo{
 		IsChunked:  true,
-		StreamURL:  "", // No single URL for chunked
-		TotalBytes: asset.TotalBytes,
+		TotalBytes: asset.SizeBytes,
 		MIMEType:   asset.MIMEType,
 		ChunkCount: len(chunkURLs),
 		ChunkURLs:  chunkURLs,
 	}, nil
-}
-
-type StreamInfo struct {
-	IsChunked  bool     `json:"isChunked"`
-	StreamURL  string   `json:"streamUrl,omitempty"`
-	TotalBytes int64    `json:"totalBytes"`
-	MIMEType   string   `json:"mimeType"`
-	ChunkCount int      `json:"chunkCount,omitempty"`
-	ChunkURLs  []string `json:"chunkUrls,omitempty"`
 }
 
 func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
@@ -311,11 +317,19 @@ func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
 	if !ok {
 		return Asset{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
 	}
+
 	if asset.IsChunked {
-		for _, chunkID := range asset.ChunkIDs {
-			if err := p.Delete(ctx, chunkID, asset.ProviderBucketOrChat); err != nil {
+		chunks, err := s.repo.GetChunks(ctx, id)
+		if err != nil {
+			return Asset{}, fmt.Errorf("get chunks for delete: %w", err)
+		}
+		for _, c := range chunks {
+			if err := p.Delete(ctx, c.ChunkFileID, asset.ProviderBucketOrChat); err != nil {
 				return Asset{}, fmt.Errorf("delete chunk from provider %q failed: %w", p.Name(), err)
 			}
+		}
+		if err := s.repo.DeleteChunks(ctx, id); err != nil {
+			return Asset{}, fmt.Errorf("delete chunk records: %w", err)
 		}
 	} else if err := p.Delete(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat); err != nil {
 		return Asset{}, fmt.Errorf("delete from provider %q failed: %w", p.Name(), err)
@@ -335,7 +349,6 @@ func persistUpload(src io.Reader) (*os.File, int64, string, []byte, error) {
 	sniff := make([]byte, 0, 512)
 	var total int64
 
-	// 200MB absolute max (for members with chunking)
 	const absoluteMax = 200 * 1024 * 1024
 
 	for {

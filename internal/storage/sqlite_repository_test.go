@@ -38,17 +38,30 @@ func TestSQLiteRepositoryLifecycle(t *testing.T) {
 		Project:              "project-a",
 		Usage:                "cover",
 		IsChunked:            true,
-		ChunkIDs:             []string{"chunk-1", "chunk-2"},
-		TotalBytes:           246,
 	})
 	if err != nil {
 		t.Fatalf("create asset: %v", err)
 	}
-	if created.ID != "asset-1" || created.Provider != "tg" {
+	if created.ID != "asset-1" || created.Provider != "tg" || !created.IsChunked {
 		t.Fatalf("unexpected created asset: %#v", created)
 	}
-	if len(created.ChunkIDs) != 2 || created.ChunkIDs[1] != "chunk-2" {
-		t.Fatalf("unexpected chunk ids: %#v", created.ChunkIDs)
+
+	// Save chunks
+	chunks := []media.Chunk{
+		{AssetID: "asset-1", ChunkIndex: 0, ChunkFileID: "chunk-file-1"},
+		{AssetID: "asset-1", ChunkIndex: 1, ChunkFileID: "chunk-file-2"},
+	}
+	if err := repo.SaveChunks(ctx, "asset-1", chunks); err != nil {
+		t.Fatalf("save chunks: %v", err)
+	}
+
+	// Get chunks
+	gotChunks, err := repo.GetChunks(ctx, "asset-1")
+	if err != nil {
+		t.Fatalf("get chunks: %v", err)
+	}
+	if len(gotChunks) != 2 || gotChunks[0].ChunkFileID != "chunk-file-1" || gotChunks[1].ChunkFileID != "chunk-file-2" {
+		t.Fatalf("unexpected chunks: %#v", gotChunks)
 	}
 
 	got, err := repo.GetByID(ctx, "asset-1")
@@ -73,5 +86,17 @@ func TestSQLiteRepositoryLifecycle(t *testing.T) {
 	}
 	if deleted.Status != media.StatusDeleted || deleted.DeletedAt == nil {
 		t.Fatalf("asset was not marked deleted: %#v", deleted)
+	}
+
+	// Delete chunks
+	if err := repo.DeleteChunks(ctx, "asset-1"); err != nil {
+		t.Fatalf("delete chunks: %v", err)
+	}
+	gotChunks, err = repo.GetChunks(ctx, "asset-1")
+	if err != nil {
+		t.Fatalf("get chunks after delete: %v", err)
+	}
+	if len(gotChunks) != 0 {
+		t.Fatalf("want 0 chunks after delete, got %d", len(gotChunks))
 	}
 }

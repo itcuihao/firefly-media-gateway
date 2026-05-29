@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -33,13 +32,17 @@ CREATE TABLE IF NOT EXISTS media_assets (
     project TEXT NOT NULL,
     usage TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('active', 'deleted')),
+    is_chunked INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    deleted_at DATETIME NULL,
-    is_chunked INTEGER NOT NULL DEFAULT 0,
-    chunk_count INTEGER NOT NULL DEFAULT 0,
-    chunk_ids TEXT NOT NULL DEFAULT '[]',
-    total_bytes INTEGER NOT NULL DEFAULT 0
+    deleted_at DATETIME NULL
+);
+
+CREATE TABLE IF NOT EXISTS media_chunks (
+    asset_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    chunk_file_id TEXT NOT NULL,
+    PRIMARY KEY (asset_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_assets_status ON media_assets(status);
@@ -58,21 +61,14 @@ func (r *SQLiteRepository) Create(ctx context.Context, input media.CreateAssetIn
 INSERT INTO media_assets (
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status,
-	is_chunked, chunk_count, chunk_ids, total_bytes
+	project, usage, status, is_chunked
 )
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 RETURNING
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at,
-	is_chunked, chunk_count, chunk_ids, total_bytes
+	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 `
-
-	chunkIDs, err := json.Marshal(input.ChunkIDs)
-	if err != nil {
-		return media.Asset{}, fmt.Errorf("marshal chunk ids: %w", err)
-	}
 
 	row := r.db.QueryRowContext(ctx, q,
 		input.ID,
@@ -87,9 +83,6 @@ RETURNING
 		input.Usage,
 		media.StatusActive,
 		input.IsChunked,
-		len(input.ChunkIDs),
-		string(chunkIDs),
-		input.TotalBytes,
 	)
 
 	asset, err := scanSQLiteAsset(row)
@@ -104,8 +97,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) (media.Asset,
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at,
-	is_chunked, chunk_count, chunk_ids, total_bytes
+	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 FROM media_assets
 WHERE id = ?
 `
@@ -129,8 +121,7 @@ WHERE id = ?
 RETURNING
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at,
-	is_chunked, chunk_count, chunk_ids, total_bytes
+	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 `
 
 	row := r.db.QueryRowContext(ctx, q, media.StatusDeleted, id)
@@ -149,8 +140,7 @@ func (r *SQLiteRepository) List(ctx context.Context, limit, offset int) ([]media
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
-	project, usage, status, created_at, updated_at, deleted_at,
-	is_chunked, chunk_count, chunk_ids, total_bytes
+	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 FROM media_assets
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?
@@ -177,6 +167,41 @@ LIMIT ? OFFSET ?
 	return assets, nil
 }
 
+func (r *SQLiteRepository) SaveChunks(ctx context.Context, assetID string, chunks []media.Chunk) error {
+	const q = `INSERT INTO media_chunks (asset_id, chunk_index, chunk_file_id) VALUES (?, ?, ?)`
+	for _, c := range chunks {
+		if _, err := r.db.ExecContext(ctx, q, assetID, c.ChunkIndex, c.ChunkFileID); err != nil {
+			return fmt.Errorf("save chunk %d: %w", c.ChunkIndex, err)
+		}
+	}
+	return nil
+}
+
+func (r *SQLiteRepository) GetChunks(ctx context.Context, assetID string) ([]media.Chunk, error) {
+	const q = `SELECT asset_id, chunk_index, chunk_file_id FROM media_chunks WHERE asset_id = ? ORDER BY chunk_index`
+	rows, err := r.db.QueryContext(ctx, q, assetID)
+	if err != nil {
+		return nil, fmt.Errorf("get chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var chunks []media.Chunk
+	for rows.Next() {
+		var c media.Chunk
+		if err := rows.Scan(&c.AssetID, &c.ChunkIndex, &c.ChunkFileID); err != nil {
+			return nil, fmt.Errorf("scan chunk: %w", err)
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
+func (r *SQLiteRepository) DeleteChunks(ctx context.Context, assetID string) error {
+	const q = `DELETE FROM media_chunks WHERE asset_id = ?`
+	_, err := r.db.ExecContext(ctx, q, assetID)
+	return err
+}
+
 func scanSQLiteAsset(s scanner) (media.Asset, error) {
 	var asset media.Asset
 	var providerBucket sql.NullString
@@ -184,7 +209,6 @@ func scanSQLiteAsset(s scanner) (media.Asset, error) {
 	var deletedAt any
 	var createdAt any
 	var updatedAt any
-	var chunkIDsJSON string
 
 	err := s.Scan(
 		&asset.ID,
@@ -202,9 +226,6 @@ func scanSQLiteAsset(s scanner) (media.Asset, error) {
 		&updatedAt,
 		&deletedAt,
 		&asset.IsChunked,
-		&asset.ChunkCount,
-		&chunkIDsJSON,
-		&asset.TotalBytes,
 	)
 	if err != nil {
 		return media.Asset{}, err
@@ -215,11 +236,6 @@ func scanSQLiteAsset(s scanner) (media.Asset, error) {
 	}
 	if sha256.Valid {
 		asset.SHA256 = &sha256.String
-	}
-	if chunkIDsJSON != "" {
-		if err := json.Unmarshal([]byte(chunkIDsJSON), &asset.ChunkIDs); err != nil {
-			return media.Asset{}, fmt.Errorf("unmarshal chunk ids: %w", err)
-		}
 	}
 
 	var errTime error

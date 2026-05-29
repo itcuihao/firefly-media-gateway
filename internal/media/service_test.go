@@ -70,7 +70,10 @@ func TestDeleteChunkedDeletesEveryChunk(t *testing.T) {
 			ProviderBucketOrChat: &location,
 			Status:               StatusActive,
 			IsChunked:            true,
-			ChunkIDs:             []string{"chunk-1", "chunk-2"},
+		},
+		chunks: []Chunk{
+			{AssetID: "asset-1", ChunkIndex: 0, ChunkFileID: "chunk-1"},
+			{AssetID: "asset-1", ChunkIndex: 1, ChunkFileID: "chunk-2"},
 		},
 	}
 	p := &fakeProvider{name: "fake"}
@@ -92,7 +95,8 @@ func TestDeleteChunkedDeletesEveryChunk(t *testing.T) {
 }
 
 type fakeRepository struct {
-	asset Asset
+	asset  Asset
+	chunks []Chunk
 }
 
 func (r *fakeRepository) Create(context.Context, CreateAssetInput) (Asset, error) {
@@ -118,6 +122,20 @@ func (r *fakeRepository) List(context.Context, int, int) ([]Asset, error) {
 	return nil, nil
 }
 
+func (r *fakeRepository) SaveChunks(_ context.Context, assetID string, chunks []Chunk) error {
+	r.chunks = chunks
+	return nil
+}
+
+func (r *fakeRepository) GetChunks(_ context.Context, assetID string) ([]Chunk, error) {
+	return r.chunks, nil
+}
+
+func (r *fakeRepository) DeleteChunks(_ context.Context, assetID string) error {
+	r.chunks = nil
+	return nil
+}
+
 type fakeProvider struct {
 	name       string
 	deletedIDs []string
@@ -136,6 +154,6 @@ func (p *fakeProvider) Delete(_ context.Context, providerFileID string, _ *strin
 	return nil
 }
 
-func (p *fakeProvider) GetAccessURL(context.Context, string, *string) (string, error) {
-	return "", nil
+func (p *fakeProvider) GetAccess(context.Context, string, *string) (provider.AccessResult, error) {
+	return provider.AccessResult{}, nil
 }

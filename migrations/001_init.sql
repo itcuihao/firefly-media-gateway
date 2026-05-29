@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS media_assets (
     id UUID PRIMARY KEY,
-    provider VARCHAR(16) NOT NULL CHECK (provider IN ('tg', 'r2')),
+    provider VARCHAR(16) NOT NULL CHECK (provider IN ('tg', 'r2', 'worker')),
     provider_file_id TEXT NOT NULL,
     provider_bucket_or_chat TEXT,
     public_url TEXT NOT NULL,
@@ -10,14 +10,23 @@ CREATE TABLE IF NOT EXISTS media_assets (
     project VARCHAR(128) NOT NULL,
     usage VARCHAR(32) NOT NULL,
     status VARCHAR(16) NOT NULL CHECK (status IN ('active', 'deleted')),
+    is_chunked BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ NULL
 );
 
+CREATE TABLE IF NOT EXISTS media_chunks (
+    asset_id UUID NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    chunk_file_id TEXT NOT NULL,
+    PRIMARY KEY (asset_id, chunk_index)
+);
+
 CREATE INDEX IF NOT EXISTS idx_media_assets_status ON media_assets(status);
 CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(project);
 CREATE INDEX IF NOT EXISTS idx_media_assets_created_at ON media_assets(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_is_chunked ON media_assets(is_chunked);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
