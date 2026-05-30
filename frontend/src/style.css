@@ -53,6 +53,12 @@ body {
   display: flex;
 }
 
+#app {
+  width: 100%;
+  display: flex;
+  min-height: 100vh;
+}
+
 /* Scrollbar Styling */
 ::-webkit-scrollbar {
   width: 8px;
