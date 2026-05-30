@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, inject } from 'vue'
 import { apiRequest, getApiToken } from '../api'
 import type { HealthInfo, MediaAsset } from '../api'
 
 const emit = defineEmits(['switch-tab'])
+
+const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
 const loading = ref(true)
 const health = ref<HealthInfo | null>(null)
@@ -12,6 +14,16 @@ const apiToken = ref(getApiToken())
 
 // Dynamic data counters computed from loaded media assets
 const mediaStats = computed(() => {
+  if (loading.value) {
+    return {
+      totalCount: '--',
+      totalSize: '--',
+      images: { count: '0', size: '0 B', percent: 0 },
+      videos: { count: '0', size: '0 B', percent: 0 },
+      others: { count: '0', size: '0 B', percent: 0 }
+    }
+  }
+
   let imgCount = 0
   let imgBytes = 0
   let vidCount = 0
@@ -38,24 +50,39 @@ const mediaStats = computed(() => {
   const totalCount = mediaList.value.length
 
   return {
-    totalCount,
+    totalCount: String(totalCount),
     totalSize: formatBytes(totalBytes),
     images: {
-      count: imgCount,
+      count: String(imgCount),
       size: formatBytes(imgBytes),
       percent: totalCount > 0 ? (imgCount / totalCount) * 100 : 0
     },
     videos: {
-      count: vidCount,
+      count: String(vidCount),
       size: formatBytes(vidBytes),
       percent: totalCount > 0 ? (vidCount / totalCount) * 100 : 0
     },
     others: {
-      count: otherCount,
+      count: String(otherCount),
       size: formatBytes(otherBytes),
       percent: totalCount > 0 ? (otherCount / totalCount) * 100 : 0
     }
   }
+})
+
+// Prevent flash of red "断开/未运行" during initial health check load
+const healthStatusText = computed(() => {
+  if (loading.value && !health.value) {
+    return '连接中...'
+  }
+  return health.value?.status === 'ok' ? '在线运行' : '断开/未运行'
+})
+
+const healthStatusColor = computed(() => {
+  if (loading.value && !health.value) {
+    return '#fff'
+  }
+  return health.value?.status === 'ok' ? 'hsl(var(--md-sys-color-success))' : 'var(--md-sys-color-error)'
 })
 
 async function fetchStats() {
@@ -63,14 +90,15 @@ async function fetchStats() {
   try {
     const healthData = await apiRequest<HealthInfo>('/api/v1/health')
     health.value = healthData
-  } catch (err) {
+  } catch (err: any) {
     console.error('Failed to fetch health info:', err)
   }
 
   try {
     const listData = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
     mediaList.value = listData
-  } catch (err) {
+  } catch (err: any) {
+    showToast('拉取资源失败，请检查 Bearer Token 配置', 'error')
     console.error('Failed to fetch media assets list:', err)
   } finally {
     loading.value = false
@@ -116,8 +144,8 @@ onMounted(() => {
           <span class="material-symbols-rounded">health_and_safety</span>
         </div>
         <div class="stat-info">
-          <span class="stat-val" id="stat_health_status" :style="{ color: health?.status === 'ok' ? 'hsl(var(--md-sys-color-success))' : 'var(--md-sys-color-error)' }">
-            {{ health?.status === 'ok' ? '在线运行' : '断开/未运行' }}
+          <span class="stat-val" id="stat_health_status" :style="{ color: healthStatusColor }">
+            {{ healthStatusText }}
           </span>
           <span class="stat-label">网关服务状态</span>
         </div>
@@ -138,7 +166,8 @@ onMounted(() => {
             <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
               <span>图片类 (Images)</span>
               <span id="chart_img_txt" style="font-weight: 600;">
-                {{ mediaStats.images.count }} 个 ({{ mediaStats.images.percent.toFixed(0) }}%) - {{ mediaStats.images.size }}
+                <template v-if="loading">--</template>
+                <template v-else>{{ mediaStats.images.count }} 个 ({{ mediaStats.images.percent.toFixed(0) }}%) - {{ mediaStats.images.size }}</template>
               </span>
             </div>
             <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
@@ -150,7 +179,8 @@ onMounted(() => {
             <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
               <span>视频类 (Videos)</span>
               <span id="chart_vid_txt" style="font-weight: 600;">
-                {{ mediaStats.videos.count }} 个 ({{ mediaStats.videos.percent.toFixed(0) }}%) - {{ mediaStats.videos.size }}
+                <template v-if="loading">--</template>
+                <template v-else>{{ mediaStats.videos.count }} 个 ({{ mediaStats.videos.percent.toFixed(0) }}%) - {{ mediaStats.videos.size }}</template>
               </span>
             </div>
             <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
@@ -162,7 +192,8 @@ onMounted(() => {
             <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
               <span>其他分片/归档 (Others)</span>
               <span id="chart_other_txt" style="font-weight: 600;">
-                {{ mediaStats.others.count }} 个 ({{ mediaStats.others.percent.toFixed(0) }}%) - {{ mediaStats.others.size }}
+                <template v-if="loading">--</template>
+                <template v-else>{{ mediaStats.others.count }} 个 ({{ mediaStats.others.percent.toFixed(0) }}%) - {{ mediaStats.others.size }}</template>
               </span>
             </div>
             <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
