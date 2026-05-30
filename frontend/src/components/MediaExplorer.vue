@@ -1,35 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import {
-  NCard,
-  NGrid,
-  NGi,
-  NButton,
-  NInput,
-  NSelect,
-  NCheckbox,
-  NDrawer,
-  NDrawerContent,
-  NModal,
-  NForm,
-  NFormItem,
-  NTag,
-  useMessage,
-  useDialog
-} from 'naive-ui'
-import {
-  Search,
-  Grid3X3,
-  List,
-  RefreshCw,
-  Plus,
-  Trash2,
-  ExternalLink,
-  Copy,
-  FileText,
-  Video,
-  X
-} from 'lucide-vue-next'
+import { ref, onMounted, computed, watch, inject } from 'vue'
 import { apiRequest, openMediaAsset } from '../api'
 import type { MediaAsset } from '../api'
 
@@ -39,177 +9,179 @@ const props = defineProps({
 
 const emit = defineEmits(['uploadHandled'])
 
-const message = useMessage()
-const dialog = useDialog()
+const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
+
 const loading = ref(false)
 const assets = ref<MediaAsset[]>([])
+const layoutMode = ref<'grid' | 'list'>('grid')
 
 // Query Filters
 const searchKeyword = ref('')
-const selectedProject = ref<string | null>(null)
-const selectedUsage = ref<string | null>(null)
+const selectedProject = ref('')
+const selectedUsage = ref('')
 const showDeleted = ref(false)
-const layoutMode = ref<'grid' | 'list'>('grid')
 
 // Details Drawer state
-const drawerActive = ref(false)
+const sheetActive = ref(false)
 const activeAsset = ref<MediaAsset | null>(null)
 
-// Upload Modal Dialog state
-const uploadModalActive = ref(false)
-const uploadForm = ref({
-  project: 'interactive-video',
-  usage: 'scene',
-  member: false,
-  file: null as File | null
-})
+// Upload Modal state
+const uploadDialogOpen = ref(false)
+const uploadProject = ref('interactive-video')
+const uploadUsage = ref('cover')
+const uploadIsMember = ref(false)
+const fileInputRef = ref<HTMLInputElement | null>(null)
 
-// Global refresh dispatcher
-const refreshStats = inject<Ref<number>>('refreshStats')
-
-// Unique options computed from current items database for filters dropdown
-const projectOptions = computed(() => {
+// Computed dynamic options for filters based on loaded media list
+const projectsList = computed(() => {
   const projects = new Set<string>()
-  assets.value.forEach(a => {
-    if (a.project) projects.add(a.project)
+  assets.value.forEach(asset => {
+    if (asset.project) projects.add(asset.project)
   })
-  return Array.from(projects).map(p => ({ label: p, value: p }))
+  return Array.from(projects)
 })
 
-const usageOptions = computed(() => {
+const usagesList = computed(() => {
   const usages = new Set<string>()
-  assets.value.forEach(a => {
-    if (a.usage) usages.add(a.usage)
+  assets.value.forEach(asset => {
+    if (asset.usage) usages.add(asset.usage)
   })
-  return Array.from(usages).map(u => ({ label: u, value: u }))
+  return Array.from(usages)
 })
 
-// Core filter query logic matching backend list responses
+// Filter Logic
 const filteredAssets = computed(() => {
+  const keyword = searchKeyword.value.trim().toLowerCase()
   return assets.value.filter(asset => {
-    // Deleted filter
-    if (!showDeleted.value && asset.status === 'deleted') {
-      return false
-    }
+    // Keyword check
+    const matchesKeyword = !keyword || 
+      asset.mediaId.toLowerCase().includes(keyword) || 
+      (asset.mimeType && asset.mimeType.toLowerCase().includes(keyword)) ||
+      (asset.project && asset.project.toLowerCase().includes(keyword))
 
-    // Keyword query
-    if (searchKeyword.value) {
-      const q = searchKeyword.value.toLowerCase()
-      const matchId = asset.id.toLowerCase().includes(q)
-      const matchMime = asset.mimeType.toLowerCase().includes(q)
-      if (!matchId && !matchMime) return false
-    }
+    // Project check
+    const matchesProj = !selectedProject.value || asset.project === selectedProject.value
+    // Usage check
+    const matchesUsage = !selectedUsage.value || asset.usage === selectedUsage.value
+    // Status check
+    const matchesStatus = showDeleted.value || asset.status === 'active'
 
-    // Project selection
-    if (selectedProject.value && asset.project !== selectedProject.value) {
-      return false
-    }
-
-    // Usage selection
-    if (selectedUsage.value && asset.usage !== selectedUsage.value) {
-      return false
-    }
-
-    return true
+    return matchesKeyword && matchesProj && matchesUsage && matchesStatus
   })
 })
 
 async function fetchAssets() {
   loading.value = true
   try {
-    const data = await apiRequest<MediaAsset[]>('/api/v1/media?show_deleted=true')
+    const data = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
     assets.value = data
   } catch (err: any) {
-    message.error(`无法加载媒体资源: ${err.message}`)
+    showToast(err.message || '拉取资源失败', 'error')
   } finally {
     loading.value = false
   }
 }
 
-function handleFileChange(event: Event) {
-  const target = event.target as HTMLInputElement
-  if (target.files && target.files.length > 0) {
-    uploadForm.value.file = target.files[0]
+function setExplorerLayout(layout: 'grid' | 'list') {
+  layoutMode.value = layout
+}
+
+function openDetailSheet(mediaId: string) {
+  const asset = assets.value.find(a => a.mediaId === mediaId)
+  if (!asset) return
+  activeAsset.value = asset
+  sheetActive.value = true
+}
+
+function closeDetailSheet() {
+  sheetActive.value = false
+  activeAsset.value = null
+}
+
+function openUploadDialog() {
+  uploadDialogOpen.value = true
+}
+
+function closeUploadDialog() {
+  uploadDialogOpen.value = false
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
   }
 }
 
-async function submitUpload() {
-  if (!uploadForm.value.file) {
-    message.error('请选择需要上传的文件')
+async function submitUploadFile() {
+  const fileInput = fileInputRef.value
+  if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+    showToast('请选择需要上传的文件！', 'error')
     return
   }
 
-  const formData = new FormData()
-  formData.append('file', uploadForm.value.file)
-  formData.append('project', uploadForm.value.project.trim())
-  formData.append('usage', uploadForm.value.usage)
-  formData.append('member', uploadForm.value.member ? 'true' : 'false')
+  const form = new FormData()
+  form.append('file', fileInput.files[0])
+  form.append('project', uploadProject.value.trim())
+  form.append('usage', uploadUsage.value)
+  form.append('member', uploadIsMember.value ? 'true' : 'false')
 
-  message.info('正在向网关上传媒体资源，请稍候...')
-  uploadModalActive.value = false
+  showToast('正在上传，请耐心等待...', 'success')
+  closeUploadDialog()
 
   try {
     await apiRequest('/api/v1/media/upload', {
       method: 'POST',
-      body: formData
+      body: form
     })
-    message.success('文件上传成功！')
-    
-    // Clear and reload
-    uploadForm.value.file = null
+    showToast('媒体文件上传成功！')
     fetchAssets()
-    if (refreshStats) refreshStats.value++
-  } catch (err: any) {
-    message.error(`文件上传失败: ${err.message}`)
+  } catch (e: any) {
+    showToast(e.message || '上传失败', 'error')
   }
 }
 
-function openDetail(asset: MediaAsset) {
-  activeAsset.value = asset
-  drawerActive.value = true
-}
+async function deleteAsset(mediaId: string) {
+  if (!confirm('确定要删除此媒体资源吗？\nID: ' + mediaId)) return
 
-async function copyLink(url: string) {
   try {
-    await navigator.clipboard.writeText(url)
-    message.success('链接已复制到剪贴板')
-  } catch (_) {
-    message.error('复制失败，请手动选择复制')
+    await apiRequest(`/api/v1/media/${encodeURIComponent(mediaId)}`, {
+      method: 'DELETE'
+    })
+    showToast('媒体资源已成功标记删除！')
+    fetchAssets()
+    closeDetailSheet()
+  } catch (e: any) {
+    showToast(e.message || '删除失败', 'error')
   }
 }
 
-function handleDeleteAsset(asset: MediaAsset) {
-  dialog.warning({
-    title: '确认删除资源',
-    content: `您确定要删除该资源吗? ID: ${asset.id}`,
-    positiveText: '确认删除',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await apiRequest(`/api/v1/media/${asset.id}`, { method: 'DELETE' })
-        message.success('资源已标记为删除')
-        drawerActive.value = false
-        fetchAssets()
-        if (refreshStats) refreshStats.value++
-      } catch (err: any) {
-        message.error(`删除失败: ${err.message}`)
-      }
-    }
+function copyText(txt: string) {
+  navigator.clipboard.writeText(txt).then(() => {
+    showToast('已成功复制到剪贴板！')
+  }).catch(() => {
+    showToast('复制失败，请手动选择复制', 'error')
   })
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
+function formatBytes(bytes: number) {
+  if (!bytes || bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-// Watch props trigger to load upload panel from App component
+function formatDate(dateStr: string) {
+  if (!dateStr) return '--'
+  try {
+    const d = new Date(dateStr)
+    return d.toLocaleString('zh-CN', { hour12: false })
+  } catch (e) {
+    return dateStr
+  }
+}
+
+// Watch props trigger from App component
 watch(() => props.triggerUpload, (val) => {
   if (val) {
-    uploadModalActive.value = true
+    openUploadDialog()
     emit('uploadHandled')
   }
 })
@@ -220,406 +192,259 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex flex-col gap-6 select-none relative min-h-[calc(100vh-140px)]">
-    
-    <!-- Filter search card panel -->
-    <n-card class="border border-white/5 shadow-md">
-      <div class="flex flex-col lg:flex-row gap-4 justify-between items-start lg:items-center">
-        
-        <!-- Input fields -->
-        <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
-          <n-input 
-            v-model:value="searchKeyword" 
-            placeholder="搜索资源 ID 或 MIME 格式..." 
-            clearable
-            class="max-w-[260px] w-full"
-          >
-            <template #prefix>
-              <Search class="w-4 h-4 text-gray-500" />
-            </template>
-          </n-input>
-          
-          <n-select 
-            v-model:value="selectedProject" 
-            placeholder="全部项目 (Project)" 
-            clearable 
-            :options="projectOptions"
-            class="max-w-[180px] w-full"
-          />
-
-          <n-select 
-            v-model:value="selectedUsage" 
-            placeholder="全部用途 (Usage)" 
-            clearable 
-            :options="usageOptions"
-            class="max-w-[180px] w-full"
-          />
-
-          <n-checkbox v-model:checked="showDeleted">
-            显示已删除资源
-          </n-checkbox>
-        </div>
-
-        <!-- Layout triggers and Refresh buttons -->
-        <div class="flex items-center gap-3 ml-auto lg:ml-0">
-          <div class="flex items-center bg-white/5 rounded-xl p-0.5 border border-white/5">
-            <button 
-              @click="layoutMode = 'grid'"
-              class="p-2 rounded-lg cursor-pointer transition"
-              :class="layoutMode === 'grid' ? 'bg-[#1a2126] text-cyan-400' : 'text-gray-500 hover:text-white'"
-            >
-              <Grid3X3 class="w-4 h-4" />
-            </button>
-            <button 
-              @click="layoutMode = 'list'"
-              class="p-2 rounded-lg cursor-pointer transition"
-              :class="layoutMode === 'list' ? 'bg-[#1a2126] text-cyan-400' : 'text-gray-500 hover:text-white'"
-            >
-              <List class="w-4 h-4" />
-            </button>
-          </div>
-
-          <n-button @click="fetchAssets" :disabled="loading" secondary>
-            <template #icon>
-              <RefreshCw class="w-4 h-4" :class="loading ? 'animate-spin' : ''" />
-            </template>
-            <span>刷新</span>
-          </n-button>
-        </div>
-
+  <div class="panel-view active" id="panel_explorer">
+    <!-- Filters Card -->
+    <div class="m3-card media-filter-bar">
+      <div class="filter-inputs">
+        <input class="filter-input search-field" v-model="searchKeyword" placeholder="搜索资源 ID 或 MIME 格式..." />
+        <select class="filter-input" v-model="selectedProject">
+          <option value="">全部项目 (Projects)</option>
+          <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <select class="filter-input" v-model="selectedUsage">
+          <option value="">全部用途 (Usages)</option>
+          <option v-for="u in usagesList" :key="u" :value="u">{{ u }}</option>
+        </select>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+          <input type="checkbox" v-model="showDeleted" style="accent-color: hsl(var(--md-sys-color-primary));" />
+          <span>显示已删除资源</span>
+        </label>
       </div>
-    </n-card>
 
-    <!-- Empty state loader -->
-    <div v-if="filteredAssets.length === 0" class="flex flex-col items-center justify-center py-20 text-gray-500">
-      <FolderOpen class="w-16 h-16 text-white/5 mb-4" />
-      <span class="text-sm">未检索到符合条件的媒体资源文件</span>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <div class="view-toggle-btns">
+          <button :class="['view-toggle-btn', { active: layoutMode === 'grid' }]" @click="setExplorerLayout('grid')">
+            <span class="material-symbols-rounded" style="font-size: 18px;">grid_view</span>
+            <span>网格</span>
+          </button>
+          <button :class="['view-toggle-btn', { active: layoutMode === 'list' }]" @click="setExplorerLayout('list')">
+            <span class="material-symbols-rounded" style="font-size: 18px;">format_list_bulleted</span>
+            <span>列表</span>
+          </button>
+        </div>
+
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="fetchAssets">
+          <span class="material-symbols-rounded" style="font-size: 16px;">refresh</span>
+          <span>刷新</span>
+        </button>
+      </div>
     </div>
 
-    <!-- Grid Layout render -->
-    <n-grid v-else-if="layoutMode === 'grid'" cols="2 m:3 l:4 xl:5" responsive="screen" :x-gap="16" :y-gap="16" class="select-text">
-      <n-gi v-for="asset in filteredAssets" :key="asset.id">
-        <n-card 
-          @click="openDetail(asset)"
-          class="border border-white/5 hover:border-cyan-500/30 transition-all duration-300 group cursor-pointer h-full relative"
-          content-class="p-0"
-        >
-          <!-- Asset Preview -->
-          <div class="aspect-square bg-black/40 flex items-center justify-center overflow-hidden relative">
-            <img 
-              v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'"
-              :src="asset.publicUrl"
-              class="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-            />
-            <div v-else-if="asset.mimeType.startsWith('video/')" class="flex flex-col items-center gap-2 text-cyan-500/70">
-              <Video class="w-8 h-8" />
-              <span class="text-[10px] uppercase font-bold bg-cyan-950/40 border border-cyan-500/20 px-2 py-0.5 rounded-full">Video</span>
-            </div>
-            <div v-else class="text-gray-600">
-              <FileText class="w-8 h-8" />
-            </div>
-
-            <!-- Deleted Badge -->
-            <div v-if="asset.status === 'deleted'" class="absolute inset-0 bg-red-950/70 flex items-center justify-center border border-red-500/25">
-              <span class="text-xs text-red-200 font-extrabold uppercase tracking-widest bg-red-950 px-3 py-1 rounded-full border border-red-500/40">已删除</span>
-            </div>
+    <!-- Assets Render Area: Grid -->
+    <div v-if="layoutMode === 'grid' && filteredAssets.length > 0" class="media-grid">
+      <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
+        <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
+          <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <span v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" class="material-symbols-rounded file-icon" style="color: hsl(var(--md-sys-color-secondary));">video_library</span>
+          <span v-else class="material-symbols-rounded file-icon">description</span>
+          
+          <span v-if="asset.isChunked" class="badge badge-primary" style="position: absolute; top: 8px; left: 8px;">分片上传</span>
+        </div>
+        <div class="media-card-info">
+          <div class="media-id" :title="asset.mediaId">{{ asset.mediaId }}</div>
+          <div class="media-meta-row">
+            <span>{{ formatBytes(asset.sizeBytes) }}</span>
+            <span>{{ formatDate(asset.createdAt).split(' ')[0] }}</span>
           </div>
-
-          <!-- Description Footer info -->
-          <div class="p-3.5 flex flex-col gap-1">
-            <div class="text-xs font-bold text-white truncate max-w-full font-mono">{{ asset.id }}</div>
-            <div class="flex items-center justify-between text-[10px] text-gray-500">
-              <span>{{ formatBytes(asset.fileSize) }}</span>
-              <span class="truncate max-w-[80px] font-semibold text-cyan-500/70">{{ asset.project }}</span>
-            </div>
+          <div class="media-card-tags">
+            <span class="badge">{{ asset.project }}</span>
+            <span class="badge">{{ asset.usage }}</span>
+            <span :class="['badge', asset.status === 'active' ? 'badge-success' : 'badge-error']">
+              {{ asset.status === 'active' ? '活动' : '已删除' }}
+            </span>
           </div>
-        </n-card>
-      </n-gi>
-    </n-grid>
+        </div>
+        <div class="media-actions">
+          <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1; padding: 6px 0;" @click="copyText(asset.publicUrl)">
+            <span class="material-symbols-rounded" style="font-size: 14px;">link</span>
+          </button>
+          <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1; padding: 6px 0;" @click="openDetailSheet(asset.mediaId)">
+            <span class="material-symbols-rounded" style="font-size: 14px;">visibility</span>
+          </button>
+          <button v-if="asset.status === 'active'" class="m3-btn m3-btn-danger m3-btn-sm" style="flex: 1; padding: 6px 0;" @click="deleteAsset(asset.mediaId)">
+            <span class="material-symbols-rounded" style="font-size: 14px;">delete</span>
+          </button>
+        </div>
+      </div>
+    </div>
 
-    <!-- List Layout render -->
-    <div v-else class="w-full bg-[#11181c] border border-white/5 rounded-2xl overflow-hidden shadow-lg select-text">
-      <table class="w-full text-xs text-left border-collapse">
+    <!-- Assets Render Area: List -->
+    <div v-else-if="layoutMode === 'list' && filteredAssets.length > 0" class="m3-table-wrapper">
+      <table class="m3-table">
         <thead>
-          <tr class="bg-white/5 border-b border-white/5 text-gray-400 font-semibold uppercase tracking-wider">
-            <th class="py-4 px-5 w-[80px]">预览</th>
-            <th class="py-4 px-5">资源 ID</th>
-            <th class="py-4 px-5">类型 (MIME)</th>
-            <th class="py-4 px-5">大小</th>
-            <th class="py-4 px-5">项目/用途</th>
-            <th class="py-4 px-5">状态</th>
-            <th class="py-4 px-5 text-right">操作</th>
+          <tr>
+            <th style="width: 60px;">预览</th>
+            <th>ID</th>
+            <th>类型 (MIME)</th>
+            <th>大小</th>
+            <th>项目/用途</th>
+            <th>状态</th>
+            <th style="text-align: right;">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr 
-            v-for="asset in filteredAssets" 
-            :key="asset.id"
-            @click="openDetail(asset)"
-            class="border-b border-white/5 hover:bg-white/5 cursor-pointer transition duration-150"
-          >
-            <!-- Preview -->
-            <td class="py-3 px-5">
-              <div class="w-10 h-10 bg-black/40 rounded-lg overflow-hidden flex items-center justify-center">
-                <img 
-                  v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'"
-                  :src="asset.publicUrl"
-                  class="w-full h-full object-cover"
-                />
-                <Video v-else-if="asset.mimeType.startsWith('video/')" class="w-4 h-4 text-cyan-400" />
-                <FileText v-else class="w-4 h-4 text-gray-600" />
+          <tr v-for="asset in filteredAssets" :key="asset.mediaId">
+            <td>
+              <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
+                <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
+                <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">
+                  {{ asset.mimeType.startsWith('video/') ? 'video_library' : 'description' }}
+                </span>
               </div>
             </td>
-            
-            <!-- ID -->
-            <td class="py-3 px-5 font-mono text-white font-semibold">{{ asset.id }}</td>
-            
-            <!-- Mime -->
-            <td class="py-3 px-5 text-gray-400 font-mono">{{ asset.mimeType }}</td>
-            
-            <!-- Size -->
-            <td class="py-3 px-5 text-gray-300">{{ formatBytes(asset.fileSize) }}</td>
-            
-            <!-- Project/Usage -->
-            <td class="py-3 px-5">
-              <div class="flex items-center gap-1.5 flex-wrap">
-                <n-tag size="small" type="info" :bordered="false">{{ asset.project }}</n-tag>
-                <n-tag size="small" :bordered="false">{{ asset.usage }}</n-tag>
-              </div>
+            <td>
+              <span style="font-weight: 600; color: #fff; cursor: pointer;" @click="openDetailSheet(asset.mediaId)">{{ asset.mediaId }}</span>
             </td>
-
-            <!-- Status -->
-            <td class="py-3 px-5">
-              <n-tag size="small" :type="asset.status === 'active' ? 'success' : 'error'">
-                {{ asset.status === 'active' ? '已激活' : '已删除' }}
-              </n-tag>
+            <td style="color: hsl(var(--md-sys-color-on-surface-variant)); font-family: monospace;">{{ asset.mimeType }}</td>
+            <td style="color: hsl(var(--md-sys-color-on-surface-variant));">{{ formatBytes(asset.sizeBytes) }}</td>
+            <td>
+              <span class="badge" style="margin-right: 4px;">{{ asset.project }}</span>
+              <span class="badge">{{ asset.usage }}</span>
             </td>
-
-            <!-- Actions -->
-            <td class="py-3 px-5 text-right" @click.stop>
-              <div class="flex justify-end gap-2">
-                <n-button size="tiny" type="primary" secondary @click="openMediaAsset(asset.publicUrl)">
-                  <template #icon><ExternalLink class="w-3.5 h-3.5" /></template>
-                  <span>访问</span>
-                </n-button>
-                <n-button size="tiny" type="default" secondary @click="copyLink(asset.publicUrl)">
-                  <template #icon><Copy class="w-3.5 h-3.5" /></template>
-                  <span>复制</span>
-                </n-button>
-                <n-button 
-                  v-if="asset.status === 'active'"
-                  size="tiny" 
-                  type="error" 
-                  secondary 
-                  @click="handleDeleteAsset(asset)"
-                >
-                  <template #icon><Trash2 class="w-3.5 h-3.5" /></template>
-                  <span>删除</span>
-                </n-button>
+            <td>
+              <span :class="['badge', asset.status === 'active' ? 'badge-success' : 'badge-error']">
+                {{ asset.status === 'active' ? '活动' : '已删除' }}
+              </span>
+            </td>
+            <td style="text-align: right;">
+              <div style="display: inline-flex; gap: 6px;">
+                <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="copyText(asset.publicUrl)">复制链接</button>
+                <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="openDetailSheet(asset.mediaId)">详情</button>
+                <button v-if="asset.status === 'active'" class="m3-btn m3-btn-danger m3-btn-sm" @click="deleteAsset(asset.mediaId)">删除</button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+    
+    <!-- Empty State -->
+    <div v-else style="text-align: center; padding: 80px 0; color: hsl(var(--md-sys-color-on-surface-variant));">
+      <span class="material-symbols-rounded" style="font-size: 64px; color: rgba(255,255,255,0.08); margin-bottom: 16px;">folder_off</span>
+      <p style="font-size: 15px;">未检索到符合条件的媒体资源文件</p>
+    </div>
 
-    <!-- Floating Action Button for uploading files -->
-    <button 
-      @click="uploadModalActive = true"
-      class="fab fixed bottom-8 right-8 w-14 h-14 bg-cyan-400 hover:bg-cyan-500 text-gray-900 rounded-full flex items-center justify-center shadow-lg hover:shadow-cyan-400/20 hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer z-40"
-    >
-      <Plus class="w-8 h-8 font-bold" />
+    <!-- Floating Action Button -->
+    <button class="fab" id="uploadFab" @click="openUploadDialog">
+      <span class="material-symbols-rounded" style="font-size: 32px;">add</span>
     </button>
 
-    <!-- Metadata Details Sheet (Drawer) -->
-    <n-drawer v-model:show="drawerActive" :width="400" placement="right">
-      <n-drawer-content closable>
-        <template #header>
-          <div class="text-base font-bold text-white">📁 媒体资源元数据</div>
-        </template>
-
-        <div v-if="activeAsset" class="flex flex-col gap-6 select-text">
-          
-          <!-- Large image/video preview in side pane -->
-          <div class="w-full aspect-video bg-black/60 border border-white/5 rounded-2xl overflow-hidden flex items-center justify-center relative">
-            <img 
-              v-if="activeAsset.mimeType.startsWith('image/') && activeAsset.status === 'active'"
-              :src="activeAsset.publicUrl"
-              class="w-full h-full object-contain"
-            />
-            <div v-else-if="activeAsset.mimeType.startsWith('video/')" class="flex flex-col items-center gap-2 text-cyan-400">
-              <Video class="w-12 h-12" />
-              <span class="text-xs uppercase font-extrabold tracking-wider bg-cyan-950/60 border border-cyan-500/20 px-3 py-1 rounded-full">Video File</span>
-            </div>
-            <div v-else class="text-gray-500">
-              <FileText class="w-12 h-12" />
-            </div>
-          </div>
-
-          <!-- Metadata parameters Table list -->
-          <div class="flex flex-col gap-4">
-            <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-white/5 pb-1">核心信息</h4>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">资源 ID</span>
-              <span class="col-span-2 text-white font-mono font-bold break-all">{{ activeAsset.id }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">MIME 类型</span>
-              <span class="col-span-2 text-white font-mono">{{ activeAsset.mimeType }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">资源大小</span>
-              <span class="col-span-2 text-white font-semibold">{{ formatBytes(activeAsset.fileSize) }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">项目目录</span>
-              <span class="col-span-2 text-cyan-400 font-bold">{{ activeAsset.project }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">使用场景</span>
-              <span class="col-span-2 text-white font-semibold">{{ activeAsset.usage }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">状态</span>
-              <span class="col-span-2">
-                <n-tag size="small" :type="activeAsset.status === 'active' ? 'success' : 'error'">
-                  {{ activeAsset.status === 'active' ? '已激活 (Active)' : '已删除 (Deleted)' }}
-                </n-tag>
-              </span>
-            </div>
-          </div>
-
-          <!-- BOT / Storage engine credentials -->
-          <div class="flex flex-col gap-4">
-            <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-white/5 pb-1">底层接口参数</h4>
-            <div v-if="activeAsset.tgFileId" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">TG File ID</span>
-              <span class="col-span-2 text-white font-mono break-all">{{ activeAsset.tgFileId }}</span>
-            </div>
-            <div v-if="activeAsset.tgMessageId" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">TG Message ID</span>
-              <span class="col-span-2 text-white font-mono">{{ activeAsset.tgMessageId }}</span>
-            </div>
-            <div v-if="activeAsset.tgChatId" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">TG Chat ID</span>
-              <span class="col-span-2 text-white font-mono">{{ activeAsset.tgChatId }}</span>
-            </div>
-            <div v-if="activeAsset.discordMessageId" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">Discord Msg ID</span>
-              <span class="col-span-2 text-white font-mono">{{ activeAsset.discordMessageId }}</span>
-            </div>
-            <div v-if="activeAsset.discordChannelId" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">Discord Chl ID</span>
-              <span class="col-span-2 text-white font-mono">{{ activeAsset.discordChannelId }}</span>
-            </div>
-            <div v-if="activeAsset.s3Key" class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">S3 Key</span>
-              <span class="col-span-2 text-white font-mono break-all">{{ activeAsset.s3Key }}</span>
-            </div>
-          </div>
-
-          <div class="flex flex-col gap-4">
-            <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-white/5 pb-1">时间戳</h4>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">创建时间</span>
-              <span class="col-span-2 text-white font-semibold">{{ new Date(activeAsset.createdAt).toLocaleString() }}</span>
-            </div>
-            <div class="grid grid-cols-3 text-xs py-1">
-              <span class="text-gray-400">更新时间</span>
-              <span class="col-span-2 text-white font-semibold">{{ new Date(activeAsset.updatedAt).toLocaleString() }}</span>
-            </div>
-          </div>
-
-          <!-- Bottom Trigger Buttons -->
-          <div class="flex gap-3 border-t border-white/5 pt-4 mt-2">
-            <n-button class="flex-1 cursor-pointer" type="primary" @click="openMediaAsset(activeAsset.publicUrl)">
-              <template #icon><ExternalLink class="w-4 h-4" /></template>
-              在新标签页打开
-            </n-button>
-            <n-button class="flex-1 cursor-pointer" type="default" @click="copyLink(activeAsset.publicUrl)">
-              <template #icon><Copy class="w-4 h-4" /></template>
-              复制直链
-            </n-button>
-            <n-button 
-              v-if="activeAsset.status === 'active'"
-              class="flex-1 cursor-pointer" 
-              type="error" 
-              secondary 
-              @click="handleDeleteAsset(activeAsset)"
-            >
-              <template #icon><Trash2 class="w-4 h-4" /></template>
-              删除文件
-            </n-button>
-          </div>
-
+    <!-- Dialog Modal: File Upload -->
+    <div :class="['m3-dialog-overlay', { active: uploadDialogOpen }]" id="uploadDialogOverlay">
+      <div class="m3-dialog">
+        <div class="m3-dialog-header">
+          <h3>📤 上传新媒体文件</h3>
+          <button class="m3-dialog-close" @click="closeUploadDialog">&times;</button>
         </div>
-      </n-drawer-content>
-    </n-drawer>
+        <div class="m3-dialog-body">
+          <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">
+            文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 120MB (mp4/webm/mov)。
+          </p>
 
-    <!-- Upload dialog overlay form modal -->
-    <n-modal v-model:show="uploadModalActive">
-      <n-card
-        style="width: 500px; border-radius: 20px;"
-        title="📤 上传新媒体文件"
-        :bordered="false"
-        size="huge"
-        role="dialog"
-        aria-modal="true"
-        class="border border-white/10 select-text"
-      >
-        <template #header-extra>
-          <button @click="uploadModalActive = false" class="text-gray-400 hover:text-white cursor-pointer">
-            <X class="w-5 h-5" />
-          </button>
-        </template>
-
-        <p class="text-xs text-gray-400 mb-6">
-          文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 120MB (mp4/webm/mov)。
-        </p>
-
-        <n-form :model="uploadForm" class="flex flex-col gap-5">
-          <n-form-item label="所属项目 (Project)">
-            <n-input v-model:value="uploadForm.project" placeholder="如 interactive-video" />
-          </n-form-item>
-
-          <n-form-item label="使用场景 (Usage)">
-            <n-select 
-              v-model:value="uploadForm.usage" 
-              :options="[
-                { label: 'scene (正片场景)', value: 'scene' },
-                { label: 'cover (封面缩略)', value: 'cover' },
-                { label: 'avatar (头像标志)', value: 'avatar' }
-              ]" 
-            />
-          </n-form-item>
-
-          <n-checkbox v-model:checked="uploadForm.member">
-            是否启用大文件分片上传 (需要会员身份)
-          </n-checkbox>
-
-          <n-form-item label="选择媒体文件" class="mt-2">
-            <div class="w-full flex flex-col gap-2">
-              <input 
-                type="file" 
-                accept="image/*,video/*" 
-                @change="handleFileChange"
-                class="block w-full text-xs text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-cyan-500/10 file:text-cyan-400 hover:file:bg-cyan-500/20 file:cursor-pointer"
-              />
-              <span v-if="uploadForm.file" class="text-xs text-cyan-400 font-semibold font-mono">
-                已选中: {{ uploadForm.file.name }} ({{ formatBytes(uploadForm.file.size) }})
-              </span>
+          <div class="form-field">
+            <label>所属项目 (Project)</label>
+            <div class="input-wrapper">
+              <input v-model="uploadProject" type="text" placeholder="如 myproject" />
             </div>
-          </n-form-item>
-        </n-form>
-
-        <template #footer>
-          <div class="flex justify-end gap-3">
-            <n-button @click="uploadModalActive = false" class="cursor-pointer">取消</n-button>
-            <n-button type="primary" @click="submitUpload" class="cursor-pointer">确认上传</n-button>
           </div>
-        </template>
-      </n-card>
-    </n-modal>
 
+          <div class="form-field">
+            <label>使用场景 (Usage)</label>
+            <div class="input-wrapper">
+              <select v-model="uploadUsage">
+                <option value="cover">cover (封面大图)</option>
+                <option value="scene">scene (场景/正片)</option>
+                <option value="avatar">avatar (头像/缩略图)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+              <input type="checkbox" v-model="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
+              <span>是否启用大文件分片上传 (需要会员身份)</span>
+            </label>
+          </div>
+
+          <div class="form-field" style="margin-top: 16px;">
+            <label>选择媒体文件</label>
+            <div class="input-wrapper">
+              <input ref="fileInputRef" type="file" accept="image/*,video/*" />
+            </div>
+          </div>
+        </div>
+        <div class="m3-dialog-footer">
+          <button class="m3-btn m3-btn-secondary" @click="closeUploadDialog">取消</button>
+          <button class="m3-btn m3-btn-primary" @click="submitUploadFile">确认上传</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail Drawer Panel (Sheet) -->
+    <div :class="['m3-sheet', { active: sheetActive }]" id="detailSheet">
+      <div class="m3-sheet-header">
+        <h3 style="font-size: 18px; font-weight: 600; color: #fff;">📁 媒体资源元数据</h3>
+        <button class="m3-dialog-close" @click="closeDetailSheet">&times;</button>
+      </div>
+      <div class="m3-sheet-body" id="detailSheetBody" v-if="activeAsset">
+        <div v-if="activeAsset.mimeType.startsWith('image/') && activeAsset.status === 'active'" style="width: 100%; height: 180px; border-radius: 16px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,0.08);">
+          <img :src="activeAsset.publicUrl" style="width:100%; height:100%; object-fit:contain;" />
+        </div>
+        <video v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" :src="activeAsset.publicUrl" controls style="width:100%; height:180px; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); object-fit:contain;"></video>
+        
+        <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px; margin-top: 12px;">
+          <div>
+            <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 4px;">媒体 ID (Media ID)</div>
+            <div style="font-family: monospace; color:#fff; word-break:break-all; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px;">{{ activeAsset.mediaId }}</div>
+          </div>
+          <div>
+            <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 4px;">公共访问地址 (Public Link)</div>
+            <div style="font-family: monospace; color:#fff; word-break:break-all; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px; font-size:11px;">{{ activeAsset.publicUrl }}</div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">大小</div>
+              <div style="color:#fff;">{{ formatBytes(activeAsset.sizeBytes) }}</div>
+            </div>
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">类型</div>
+              <div style="color:#fff; font-family: monospace;">{{ activeAsset.mimeType }}</div>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">项目</div>
+              <div style="color:#fff;">{{ activeAsset.project }}</div>
+            </div>
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">用途</div>
+              <div style="color:#fff;">{{ activeAsset.usage }}</div>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">分片上传</div>
+              <div style="color:#fff;">{{ activeAsset.isChunked ? '是' : '否' }}</div>
+            </div>
+            <div>
+              <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">所属 Provider</div>
+              <div style="color:#fff; text-transform: uppercase;">{{ activeAsset.provider }}</div>
+            </div>
+          </div>
+          <div>
+            <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">SHA-256</div>
+            <div style="color:#fff; font-family: monospace; font-size:11px; word-break:break-all;">{{ activeAsset.sha256 || '暂无' }}</div>
+          </div>
+          <div>
+            <div style="color: hsl(var(--md-sys-color-primary)); font-weight:600; margin-bottom: 2px;">入库时间</div>
+            <div style="color:#fff;">{{ formatDate(activeAsset.createdAt) }}</div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top: 24px; display: flex; gap: 12px;" v-if="activeAsset">
+        <button class="m3-btn m3-btn-primary m3-btn-sm" style="flex: 1;" @click="openMediaAsset(activeAsset.publicUrl)">在新标签页打开</button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1;" @click="copyText(activeAsset.publicUrl)">复制链接</button>
+      </div>
+    </div>
   </div>
 </template>

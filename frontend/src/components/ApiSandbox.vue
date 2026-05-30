@@ -1,321 +1,299 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import {
-  NCard,
-  NButton,
-  NInput,
-  NSelect,
-  NCheckbox,
-  NForm,
-  NFormItem,
-  NCode,
-  useMessage
-} from 'naive-ui'
-import {
-  Play,
-  Terminal,
-  Copy
-} from 'lucide-vue-next'
+import { ref, inject } from 'vue'
 import { getApiBaseUrl } from '../api'
 
-const message = useMessage()
-
-// API routing dropdown options
-const apiOptions = [
-  { label: 'GET /api/v1/health (服务状态与运行环境)', value: 'health' },
-  { label: 'GET /api/v1/media (文件列表过滤查询)', value: 'list' },
-  { label: 'GET /api/v1/media/{mediaId}/meta (媒体元数据获取)', value: 'meta' },
-  { label: 'POST /api/v1/media/upload (上传媒体文件对象)', value: 'upload' },
-  { label: 'DELETE /api/v1/media/{mediaId} (删除物理文件资源)', value: 'delete' },
-  { label: 'POST /api/v1/provider/telegram/chat-ids (获取 Bot 最新会话)', value: 'telegram_chats' }
-]
+const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
 const selectedApi = ref('health')
 
-// Form parameter states
-const params = ref({
-  mediaId: '',
-  project: '',
-  usage: 'scene',
-  keyword: '',
-  showDeleted: false,
-  uploadFile: null as File | null,
-  tgToken: '',
-  member: false
-})
+// Parameter states
+const sbLimit = ref('20')
+const sbOffset = ref('0')
+const sbMediaId = ref('')
+const sbProject = ref('test-project')
+const sbUsage = ref('cover')
+const sbIsMember = ref('false')
+const sbToken = ref('')
+const fileInputRef = ref<HTMLInputElement | null>(null)
 
-// Loading & Console Output states
-const requestLoading = ref(false)
-const responseStatus = ref<number | null>(null)
-const responseStatusText = ref('')
+// Output states
+const statusPillVisible = ref(false)
+const statusPillText = ref('')
+const statusPillStyle = ref({ background: '', color: '' })
 const responseBody = ref('等待发送请求，联调数据将在此实时高亮渲染...')
+const apiLoading = ref(false)
 
-function handleFileChange(event: Event) {
-  const target = event.target as HTMLInputElement
-  if (target.files && target.files.length > 0) {
-    params.value.uploadFile = target.files[0]
-  }
+function copyConsoleOutput() {
+  navigator.clipboard.writeText(responseBody.value).then(() => {
+    showToast('已成功复制到剪贴板！')
+  }).catch(() => {
+    showToast('复制失败，请手动选择复制', 'error')
+  })
 }
 
-async function triggerApiCall() {
-  requestLoading.value = ref(true).value
-  responseStatus.value = null
-  responseStatusText.value = ''
-  responseBody.value = '正在通信中...'
+async function runSandboxApi() {
+  responseBody.value = '发送请求中，请稍后...'
+  statusPillVisible.value = false
+  apiLoading.value = true
+
+  const startTime = performance.now()
+  let fetchUrl = ''
+  let options: RequestInit = {
+    method: 'GET'
+  }
 
   try {
-    let path = ''
-    let options: RequestInit = {}
-
-    const token = localStorage.getItem('firefly_api_token') || ''
-    const headers = new Headers()
+    const token = localStorage.getItem('media_gateway_token') || ''
+    const headers: Record<string, string> = {}
     if (token) {
-      headers.set('Authorization', `Bearer ${token}`)
+      headers['Authorization'] = `Bearer ${token}`
     }
 
     if (selectedApi.value === 'health') {
-      path = '/api/v1/health'
+      fetchUrl = '/api/v1/health'
       options = { method: 'GET', headers }
     } else if (selectedApi.value === 'list') {
-      const q = new URLSearchParams()
-      if (params.value.project) q.append('project', params.value.project.trim())
-      if (params.value.usage) q.append('usage', params.value.usage)
-      if (params.value.keyword) q.append('q', params.value.keyword.trim())
-      if (params.value.showDeleted) q.append('show_deleted', 'true')
-      path = `/api/v1/media?${q.toString()}`
+      const limit = sbLimit.value || '20'
+      const offset = sbOffset.value || '0'
+      fetchUrl = `/api/v1/media?limit=${limit}&offset=${offset}`
       options = { method: 'GET', headers }
     } else if (selectedApi.value === 'meta') {
-      if (!params.value.mediaId) {
-        throw new Error('请输入 mediaId')
+      const mediaId = sbMediaId.value.trim()
+      if (!mediaId) {
+        showToast('请先输入 mediaId 参数！', 'error')
+        responseBody.value = '错误: 缺少 mediaId'
+        apiLoading.value = false
+        return
       }
-      path = `/api/v1/media/${params.value.mediaId.trim()}/meta`
+      fetchUrl = `/api/v1/media/${encodeURIComponent(mediaId)}/meta`
       options = { method: 'GET', headers }
     } else if (selectedApi.value === 'delete') {
-      if (!params.value.mediaId) {
-        throw new Error('请输入 mediaId')
+      const mediaId = sbMediaId.value.trim()
+      if (!mediaId) {
+        showToast('请先输入 mediaId 参数！', 'error')
+        responseBody.value = '错误: 缺少 mediaId'
+        apiLoading.value = false
+        return
       }
-      path = `/api/v1/media/${params.value.mediaId.trim()}`
+      fetchUrl = `/api/v1/media/${encodeURIComponent(mediaId)}`
       options = { method: 'DELETE', headers }
     } else if (selectedApi.value === 'telegram_chats') {
-      path = '/api/v1/provider/telegram/chat-ids'
+      const tgToken = sbToken.value.trim()
+      fetchUrl = '/api/v1/provider/telegram/chat-ids'
       options = {
         method: 'POST',
-        headers: {
-          ...Object.fromEntries(headers.entries()),
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ token: params.value.tgToken })
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+        body: JSON.stringify({ token: tgToken })
       }
     } else if (selectedApi.value === 'upload') {
-      if (!params.value.uploadFile) {
-        throw new Error('请选择需要上传的媒体文件')
-      }
-      const formData = new FormData()
-      formData.append('file', params.value.uploadFile)
-      formData.append('project', params.value.project.trim())
-      formData.append('usage', params.value.usage)
-      formData.append('member', params.value.member ? 'true' : 'false')
+      const project = sbProject.value.trim()
+      const usage = sbUsage.value.trim()
+      const isMember = sbIsMember.value
+      const fileInput = fileInputRef.value
 
-      path = '/api/v1/media/upload'
+      if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+        showToast('请在参数中选择一个文件！', 'error')
+        responseBody.value = '错误: 请选择文件'
+        apiLoading.value = false
+        return
+      }
+
+      fetchUrl = '/api/v1/media/upload'
+      const form = new FormData()
+      form.append('file', fileInput.files[0])
+      form.append('project', project)
+      form.append('usage', usage)
+      form.append('member', isMember)
+
       options = {
         method: 'POST',
-        headers, // Do NOT set Content-Type header manually for FormData, browser sets boundary
-        body: formData
+        headers, // Browser sets multipart boundary automatically
+        body: form
       }
     }
 
-    // Assemble target URL manually to display and invoke correctly
+    // Call fetch directly to get raw response and custom timing metrics
     const baseUrl = getApiBaseUrl()
-    let requestUrl = path
-    if (baseUrl) {
-      const cleanBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
-      const cleanPath = path.startsWith('/') ? path : '/' + path
-      requestUrl = cleanBase + cleanPath
+    const cleanBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+    const cleanPath = fetchUrl.startsWith('/') ? fetchUrl : '/' + fetchUrl
+    const targetUrl = cleanBase + cleanPath
+
+    const response = await fetch(targetUrl, options)
+    const duration = (performance.now() - startTime).toFixed(0)
+
+    // Update status badge
+    statusPillVisible.value = true
+    statusPillText.value = `HTTP ${response.status} • ${duration}ms`
+    
+    if (response.status >= 200 && response.status < 300) {
+      statusPillStyle.value = {
+        background: 'rgba(133, 247, 176, 0.15)',
+        color: 'hsl(var(--md-sys-color-success))'
+      }
+      showToast('API 请求执行成功！')
+    } else {
+      statusPillStyle.value = {
+        background: 'rgba(255, 180, 171, 0.15)',
+        color: '#ffb4ab'
+      }
+      showToast(`请求失败: HTTP ${response.status}`, 'error')
     }
 
-    const resp = await fetch(requestUrl, options)
-    responseStatus.value = resp.status
-    responseStatusText.value = resp.statusText
-
-    if (resp.status === 204) {
+    if (response.status === 204) {
       responseBody.value = '// 204 No Content (操作执行成功，无返回值)'
-      message.success('接口请求执行成功')
       return
     }
 
-    const contentType = resp.headers.get('content-type') || ''
-    if (contentType.includes('application/json')) {
-      const json = await resp.json()
-      responseBody.value = JSON.stringify(json, null, 2)
+    const contentType = response.headers.get('Content-Type')
+    if (contentType && contentType.indexOf('application/json') !== -1) {
+      const jsonVal = await response.json()
+      responseBody.value = JSON.stringify(jsonVal, null, 2)
     } else {
-      responseBody.value = await resp.text()
+      responseBody.value = await response.text()
     }
-
-    if (resp.ok) {
-      message.success('接口请求成功！')
-    } else {
-      message.error(`接口请求失败: ${resp.status}`)
-    }
-
   } catch (err: any) {
-    responseBody.value = `// 客户端请求异常\nError: ${err.message}`
-    message.error(err.message)
+    const duration = (performance.now() - startTime).toFixed(0)
+    statusPillVisible.value = true
+    statusPillText.value = `ERROR • ${duration}ms`
+    statusPillStyle.value = {
+      background: 'rgba(255, 180, 171, 0.15)',
+      color: '#ffb4ab'
+    }
+    responseBody.value = `请求捕获异常: ${err.message}\n检查控制台报错或服务器网络配置。`
+    showToast('请求链接错误', 'error')
   } finally {
-    requestLoading.value = false
-  }
-}
-
-async function copyOutput() {
-  try {
-    await navigator.clipboard.writeText(responseBody.value)
-    message.success('数据控制台响应已复制！')
-  } catch (_) {
-    message.error('复制失败')
+    apiLoading.value = false
   }
 }
 </script>
 
 <template>
-  <div class="flex flex-col gap-6 select-none h-full">
-    <div>
-      <h2 class="text-xl font-bold text-white mb-1">API 联调沙盒</h2>
-      <p class="text-xs text-gray-400">在此面板中，您可以快速发起网关核心 API 的连通性校验，直接填充参数并实时高亮输出接口返回的元数据内容。</p>
-    </div>
-
-    <div class="grid grid-cols-1 lg:grid-cols-5 gap-6 items-start">
-      
-      <!-- Params Form card panel -->
-      <n-card class="border border-white/5 shadow-md lg:col-span-2 select-text">
-        <h3 class="text-sm font-bold text-white mb-4">测试参数构建</h3>
+  <div class="panel-view active" id="panel_sandbox">
+    <div class="api-sandbox-layout">
+      <!-- Left panel: Form Controls -->
+      <div class="m3-card api-params-col">
+        <h2 class="section-title">
+          <span class="material-symbols-rounded" style="color: hsl(var(--md-sys-color-primary));">network_check</span>
+          API 测试参数选择
+        </h2>
+        <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">选择一个接口端点，填充参数进行实时响应联调。</p>
         
-        <n-form :show-feedback="false" class="flex flex-col gap-4">
-          <n-form-item label="选择要联调的 API">
-            <n-select v-model:value="selectedApi" :options="apiOptions" />
-          </n-form-item>
+        <div class="form-field">
+          <label>选择调试 API</label>
+          <div class="input-wrapper">
+            <select id="sandboxApiSelector" v-model="selectedApi">
+              <option value="health">GET /api/v1/health (健康检查)</option>
+              <option value="list">GET /api/v1/media (文件列表)</option>
+              <option value="meta">GET /api/v1/media/{mediaId}/meta (媒体元数据)</option>
+              <option value="upload">POST /api/v1/media/upload (上传媒体文件)</option>
+              <option value="delete">DELETE /api/v1/media/{mediaId} (删除媒体文件)</option>
+              <option value="telegram_chats">POST /api/v1/provider/telegram/chat-ids (获取TG群组)</option>
+            </select>
+          </div>
+        </div>
 
+        <!-- Dynamic parameters builder container -->
+        <div id="sandboxParamsContainer" style="margin-top: 20px;">
           <!-- GET /api/v1/media list parameters -->
-          <template v-if="selectedApi === 'list'">
-            <n-form-item label="项目 (Project)">
-              <n-input v-model:value="params.project" placeholder="如 interactive-video" />
-            </n-form-item>
-            <n-form-item label="用途 (Usage)">
-              <n-select 
-                v-model:value="params.usage" 
-                :options="[
-                  { label: '全部', value: '' },
-                  { label: 'scene (正片场景)', value: 'scene' },
-                  { label: 'cover (封面缩略)', value: 'cover' },
-                  { label: 'avatar (头像标志)', value: 'avatar' }
-                ]" 
-              />
-            </n-form-item>
-            <n-form-item label="搜索关键词">
-              <n-input v-model:value="params.keyword" placeholder="搜索资源 ID 或 MIME" />
-            </n-form-item>
-            <n-checkbox v-model:checked="params.showDeleted">
-              显示已删除资源
-            </n-checkbox>
-          </template>
+          <div v-if="selectedApi === 'list'">
+            <div class="form-field">
+              <label>每页条数 (limit)</label>
+              <div class="input-wrapper">
+                <input v-model="sbLimit" type="number" placeholder="默认 20" />
+              </div>
+            </div>
+            <div class="form-field">
+              <label>偏移起始 (offset)</label>
+              <div class="input-wrapper">
+                <input v-model="sbOffset" type="number" placeholder="默认 0" />
+              </div>
+            </div>
+          </div>
 
           <!-- GET /meta or DELETE assets parameters -->
-          <template v-else-if="selectedApi === 'meta' || selectedApi === 'delete'">
-            <n-form-item label="媒体资源 ID (mediaId)">
-              <n-input v-model:value="params.mediaId" placeholder="输入已存储的资源 ID" />
-            </n-form-item>
-          </template>
-
-          <!-- POST /provider/telegram/chat-ids parameter -->
-          <template v-else-if="selectedApi === 'telegram_chats'">
-            <n-form-item label="Telegram Bot Token">
-              <n-input v-model:value="params.tgToken" type="password" placeholder="为空则自动加载后端 env 配置" />
-            </n-form-item>
-          </template>
+          <div v-else-if="selectedApi === 'meta' || selectedApi === 'delete'">
+            <div class="form-field">
+              <label>媒体 ID (mediaId)</label>
+              <div class="input-wrapper">
+                <input v-model="sbMediaId" type="text" placeholder="请输入已存在的 mediaId" />
+              </div>
+            </div>
+          </div>
 
           <!-- POST /media/upload parameters -->
-          <template v-else-if="selectedApi === 'upload'">
-            <n-form-item label="所属项目 (Project)">
-              <n-input v-model:value="params.project" placeholder="如 interactive-video" />
-            </n-form-item>
-            <n-form-item label="使用场景 (Usage)">
-              <n-select 
-                v-model:value="params.usage" 
-                :options="[
-                  { label: 'scene (正片场景)', value: 'scene' },
-                  { label: 'cover (封面缩略)', value: 'cover' },
-                  { label: 'avatar (头像标志)', value: 'avatar' }
-                ]" 
-              />
-            </n-form-item>
-            <n-checkbox v-model:checked="params.member" class="mb-2">
-              启用大文件分片上传 (需要会员身份)
-            </n-checkbox>
-            <n-form-item label="选择上传文件">
-              <input 
-                type="file" 
-                accept="image/*,video/*" 
-                @change="handleFileChange"
-                class="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-cyan-500/10 file:text-cyan-400 hover:file:bg-cyan-500/20 file:cursor-pointer"
-              />
-            </n-form-item>
-          </template>
-        </n-form>
-
-        <div class="mt-6">
-          <n-button 
-            type="primary" 
-            @click="triggerApiCall" 
-            :loading="requestLoading" 
-            class="w-full cursor-pointer"
-          >
-            <template #icon>
-              <Play class="w-4 h-4" />
-            </template>
-            <span>发起 API 请求</span>
-          </n-button>
-        </div>
-      </n-card>
-
-      <!-- Console output logger block -->
-      <div class="lg:col-span-3 flex flex-col border border-white/5 rounded-2xl overflow-hidden bg-[#0a0e12] h-[550px] shadow-lg">
-        
-        <!-- Header -->
-        <div class="bg-white/5 px-5 py-3.5 border-b border-white/5 flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <Terminal class="w-4 h-4 text-purple-400" />
-            <h3 class="text-xs font-bold text-white uppercase tracking-wider">控制台调试输出 (Console Response)</h3>
+          <div v-else-if="selectedApi === 'upload'">
+            <div class="form-field">
+              <label>所属项目 (project)</label>
+              <div class="input-wrapper">
+                <input v-model="sbProject" type="text" placeholder="例如 default-proj" />
+              </div>
+            </div>
+            <div class="form-field">
+              <label>使用用途 (usage)</label>
+              <div class="input-wrapper">
+                <input v-model="sbUsage" type="text" placeholder="例如 cover / avatar" />
+              </div>
+            </div>
+            <div class="form-field">
+              <label>会员专享 (member)</label>
+              <div class="input-wrapper">
+                <select v-model="sbIsMember">
+                  <option value="false">否 (false)</option>
+                  <option value="true">是 (true)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-field">
+              <label>文件 (file)</label>
+              <div class="input-wrapper">
+                <input ref="fileInputRef" type="file" accept="image/*,video/*" />
+              </div>
+            </div>
           </div>
 
-          <div class="flex items-center gap-3">
-            <span 
-              v-if="responseStatus !== null"
-              class="text-[10px] font-bold px-2 py-0.5 rounded-full font-mono uppercase"
-              :class="responseStatus >= 200 && responseStatus < 300 
-                ? 'bg-green-950/40 border border-green-500/25 text-green-400' 
-                : 'bg-red-950/40 border border-red-500/25 text-red-400'"
-            >
-              HTTP {{ responseStatus }} {{ responseStatusText }}
-            </span>
-            
-            <n-button size="tiny" type="default" secondary @click="copyOutput">
-              <template #icon>
-                <Copy class="w-3.5 h-3.5" />
-              </template>
-              <span>复制响应</span>
-            </n-button>
+          <!-- POST /provider/telegram/chat-ids parameter -->
+          <div v-else-if="selectedApi === 'telegram_chats'">
+            <div class="form-field">
+              <label>Telegram Bot Token</label>
+              <div class="input-wrapper">
+                <input v-model="sbToken" type="password" placeholder="若留空则使用默认配置" />
+              </div>
+            </div>
           </div>
+
+          <!-- No parameters needed -->
+          <p v-else style="font-size: 13px; color:hsl(var(--md-sys-color-on-surface-variant));">此接口无需配置额外参数</p>
         </div>
 
-        <!-- Render text console -->
-        <div class="flex-1 p-5 overflow-auto font-mono text-xs select-text leading-relaxed">
-          <n-code 
-            :code="responseBody" 
-            language="json" 
-            :word-wrap="true" 
-          />
+        <div style="margin-top: 28px;">
+          <button class="m3-btn m3-btn-primary" style="width: 100%;" @click="runSandboxApi" :disabled="apiLoading">
+            <span class="material-symbols-rounded">play_arrow</span>
+            <span>{{ apiLoading ? '请求中...' : '发起 API 请求' }}</span>
+          </button>
         </div>
-
       </div>
 
+      <!-- Right panel: Code Output console -->
+      <div class="api-response-col">
+        <div class="console-header">
+          <h2 class="section-title" style="margin-bottom: 0;">
+            <span class="material-symbols-rounded" style="color: hsl(var(--md-sys-color-secondary));">terminal</span>
+            调试响应控制台
+          </h2>
+          
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <div class="status-pill" id="sandboxStatusPill" v-if="statusPillVisible" :style="statusPillStyle">
+              {{ statusPillText }}
+            </div>
+            <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="copyConsoleOutput">
+              <span class="material-symbols-rounded" style="font-size: 16px;">content_copy</span>
+              <span>复制响应</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="console-output" id="sandboxOutput">{{ responseBody }}</div>
+      </div>
     </div>
   </div>
 </template>

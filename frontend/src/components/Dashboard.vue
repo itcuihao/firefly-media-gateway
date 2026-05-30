@@ -1,75 +1,59 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject, type Ref } from 'vue'
-import { 
-  NCard, 
-  NGrid, 
-  NGi, 
-  NButton, 
-  NProgress, 
-  NTag, 
-  NSpin,
-  useMessage 
-} from 'naive-ui'
-import { 
-  CloudUpload, 
-  Database, 
-  ShieldAlert, 
-  ShieldCheck, 
-  ChartPie, 
-  Info,
-  RefreshCw
-} from 'lucide-vue-next'
-import { apiRequest } from '../api'
+import { ref, onMounted, computed } from 'vue'
+import { apiRequest, getApiToken } from '../api'
 import type { HealthInfo, MediaAsset } from '../api'
 
-const emit = defineEmits(['open-upload'])
+const emit = defineEmits(['switch-tab'])
 
-const message = useMessage()
 const loading = ref(true)
 const health = ref<HealthInfo | null>(null)
 const mediaList = ref<MediaAsset[]>([])
-const refreshTrigger = inject<Ref<number>>('refreshStats')
+const apiToken = ref(getApiToken())
 
 // Dynamic data counters computed from loaded media assets
 const mediaStats = computed(() => {
-  let imagesCount = 0
-  let imagesSize = 0
-  let videosCount = 0
-  let videosSize = 0
-  let othersCount = 0
-  let othersSize = 0
+  let imgCount = 0
+  let imgBytes = 0
+  let vidCount = 0
+  let vidBytes = 0
+  let otherCount = 0
+  let otherBytes = 0
+  let totalBytes = 0
 
   mediaList.value.forEach(asset => {
+    totalBytes += asset.sizeBytes
     const mime = asset.mimeType.toLowerCase()
     if (mime.startsWith('image/')) {
-      imagesCount++
-      imagesSize += asset.fileSize
+      imgCount++
+      imgBytes += asset.sizeBytes
     } else if (mime.startsWith('video/')) {
-      videosCount++
-      videosSize += asset.fileSize
+      vidCount++
+      vidBytes += asset.sizeBytes
     } else {
-      othersCount++
-      othersSize += asset.fileSize
+      otherCount++
+      otherBytes += asset.sizeBytes
     }
   })
 
   const totalCount = mediaList.value.length
 
   return {
+    totalCount,
+    totalSize: formatBytes(totalBytes),
     images: {
-      count: imagesCount,
-      size: formatBytes(imagesSize),
-      percent: totalCount > 0 ? (imagesCount / totalCount) * 100 : 0
+      count: imgCount,
+      size: formatBytes(imgBytes),
+      percent: totalCount > 0 ? (imgCount / totalCount) * 100 : 0
     },
     videos: {
-      count: videosCount,
-      size: formatBytes(videosSize),
-      percent: totalCount > 0 ? (videosCount / totalCount) * 100 : 0
+      count: vidCount,
+      size: formatBytes(vidBytes),
+      percent: totalCount > 0 ? (vidCount / totalCount) * 100 : 0
     },
     others: {
-      count: othersCount,
-      size: formatBytes(othersSize),
-      percent: totalCount > 0 ? (othersCount / totalCount) * 100 : 0
+      count: otherCount,
+      size: formatBytes(otherBytes),
+      percent: totalCount > 0 ? (otherCount / totalCount) * 100 : 0
     }
   }
 })
@@ -79,28 +63,27 @@ async function fetchStats() {
   try {
     const healthData = await apiRequest<HealthInfo>('/api/v1/health')
     health.value = healthData
+  } catch (err) {
+    console.error('Failed to fetch health info:', err)
+  }
 
-    // Fetch media list to dynamically aggregate formatting distribution
-    const listData = await apiRequest<MediaAsset[]>('/api/v1/media?show_deleted=true')
+  try {
+    const listData = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
     mediaList.value = listData
-  } catch (err: any) {
-    message.error(`无法获取服务器状态: ${err.message}`)
+  } catch (err) {
+    console.error('Failed to fetch media assets list:', err)
   } finally {
     loading.value = false
   }
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 Bytes'
+  if (!bytes || bytes === 0) return '0 B'
   const k = 1024
-  const sizes = ['Bytes', 'KB', 'MB', 'GB']
+  const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
-
-watch(() => refreshTrigger?.value, () => {
-  fetchStats()
-})
 
 onMounted(() => {
   fetchStats()
@@ -108,184 +91,118 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex flex-col gap-6">
-    
-    <!-- Top Action header -->
-    <div class="flex justify-between items-center">
-      <div>
-        <h2 class="text-xl font-bold text-white mb-1">控制中心大盘</h2>
-        <p class="text-xs text-gray-400">实时监控存储构成、节点连通及网关健康度指标。</p>
+  <div class="panel-view active" id="panel_dashboard">
+    <div class="m3-grid-3">
+      <div class="m3-card stat-card">
+        <div class="stat-icon primary">
+          <span class="material-symbols-rounded">cloud_upload</span>
+        </div>
+        <div class="stat-info">
+          <span class="stat-val" id="stat_total_count">{{ mediaStats.totalCount }}</span>
+          <span class="stat-label">库中文件总数</span>
+        </div>
       </div>
-      <div class="flex gap-2">
-        <n-button size="medium" @click="fetchStats" :disabled="loading" secondary circle>
-          <template #icon>
-            <RefreshCw class="w-4 h-4" :class="loading ? 'animate-spin' : ''" />
-          </template>
-        </n-button>
-        <n-button size="medium" type="primary" @click="emit('open-upload')" class="cursor-pointer">
-          <template #icon>
-            <CloudUpload class="w-4 h-4" />
-          </template>
-          <span>上传文件</span>
-        </n-button>
+      <div class="m3-card stat-card">
+        <div class="stat-icon secondary">
+          <span class="material-symbols-rounded">database</span>
+        </div>
+        <div class="stat-info">
+          <span class="stat-val" id="stat_total_size">{{ mediaStats.totalSize }}</span>
+          <span class="stat-label">总计占用容量</span>
+        </div>
+      </div>
+      <div class="m3-card stat-card">
+        <div class="stat-icon success">
+          <span class="material-symbols-rounded">health_and_safety</span>
+        </div>
+        <div class="stat-info">
+          <span class="stat-val" id="stat_health_status" :style="{ color: health?.status === 'ok' ? 'hsl(var(--md-sys-color-success))' : 'var(--md-sys-color-error)' }">
+            {{ health?.status === 'ok' ? '在线运行' : '断开/未运行' }}
+          </span>
+          <span class="stat-label">网关服务状态</span>
+        </div>
       </div>
     </div>
 
-    <n-spin :show="loading">
-      <div class="flex flex-col gap-6">
+    <div class="m3-grid-2">
+      <!-- Storage Info -->
+      <div class="m3-card">
+        <h2 class="section-title">
+          <span class="material-symbols-rounded" style="color: hsl(var(--md-sys-color-primary));">donut_large</span>
+          媒体资源构成
+        </h2>
+        <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 24px;">网关内保存的各类媒体文件占比及详细数据。</p>
         
-        <!-- Status Stats Cards Grid -->
-        <n-grid cols="1 s:3" responsive="screen" :x-gap="16" :y-gap="16">
-          <n-gi>
-            <n-card class="border border-white/5 hover:border-cyan-500/20 transition-all duration-300">
-              <div class="flex items-center gap-4">
-                <div class="w-12 h-12 bg-cyan-950/40 border border-cyan-500/20 text-cyan-400 rounded-2xl flex items-center justify-center">
-                  <CloudUpload class="w-6 h-6" />
-                </div>
-                <div class="flex flex-col">
-                  <span class="text-2xl font-bold text-white">{{ mediaList.filter(a => a.status === 'active').length }}</span>
-                  <span class="text-xs text-gray-400 font-medium">库中文件总数</span>
-                </div>
-              </div>
-            </n-card>
-          </n-gi>
+        <div style="display: flex; flex-direction: column; gap: 18px;">
+          <div>
+            <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
+              <span>图片类 (Images)</span>
+              <span id="chart_img_txt" style="font-weight: 600;">
+                {{ mediaStats.images.count }} 个 ({{ mediaStats.images.percent.toFixed(0) }}%) - {{ mediaStats.images.size }}
+              </span>
+            </div>
+            <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+              <div id="chart_img_bar" :style="{ width: mediaStats.images.percent + '%' }" style="height: 100%; background: hsl(var(--md-sys-color-primary)); transition: width 1s;"></div>
+            </div>
+          </div>
 
-          <n-gi>
-            <n-card class="border border-white/5 hover:border-cyan-500/20 transition-all duration-300">
-              <div class="flex items-center gap-4">
-                <div class="w-12 h-12 bg-purple-950/40 border border-purple-500/20 text-purple-400 rounded-2xl flex items-center justify-center">
-                  <Database class="w-6 h-6" />
-                </div>
-                <div class="flex flex-col">
-                  <span class="text-2xl font-bold text-white">
-                    {{ formatBytes(mediaList.reduce((sum, item) => sum + item.fileSize, 0)) }}
-                  </span>
-                  <span class="text-xs text-gray-400 font-medium">总计占用容量</span>
-                </div>
-              </div>
-            </n-card>
-          </n-gi>
+          <div>
+            <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
+              <span>视频类 (Videos)</span>
+              <span id="chart_vid_txt" style="font-weight: 600;">
+                {{ mediaStats.videos.count }} 个 ({{ mediaStats.videos.percent.toFixed(0) }}%) - {{ mediaStats.videos.size }}
+              </span>
+            </div>
+            <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+              <div id="chart_vid_bar" :style="{ width: mediaStats.videos.percent + '%' }" style="height: 100%; background: hsl(var(--md-sys-color-secondary)); transition: width 1s;"></div>
+            </div>
+          </div>
 
-          <n-gi>
-            <n-card class="border border-white/5 hover:border-cyan-500/20 transition-all duration-300">
-              <div class="flex items-center gap-4">
-                <div 
-                  class="w-12 h-12 rounded-2xl flex items-center justify-center"
-                  :class="health?.status === 'ok' 
-                    ? 'bg-green-950/40 border border-green-500/20 text-green-400' 
-                    : 'bg-red-950/40 border border-red-500/20 text-red-400'"
-                >
-                  <ShieldCheck v-if="health?.status === 'ok'" class="w-6 h-6" />
-                  <ShieldAlert v-else class="w-6 h-6" />
-                </div>
-                <div class="flex flex-col">
-                  <span class="text-2xl font-bold text-white uppercase">{{ health?.status || 'OFFLINE' }}</span>
-                  <span class="text-xs text-gray-400 font-medium">网关服务状态</span>
-                </div>
-              </div>
-            </n-card>
-          </n-gi>
-        </n-grid>
-
-        <!-- Media distribution & Environment Grid -->
-        <n-grid cols="1 m:2" responsive="screen" :x-gap="20" :y-gap="20">
-          <n-gi>
-            <n-card class="border border-white/5 h-full">
-              <h3 class="text-base font-bold text-white flex items-center gap-2 mb-2">
-                <ChartPie class="w-5 h-5 text-cyan-400" />
-                媒体资源构成
-              </h3>
-              <p class="text-xs text-gray-400 mb-6">网关内保存的各类媒体文件占比及详细数据比例。</p>
-              
-              <div class="flex flex-col gap-5">
-                <div>
-                  <div class="flex justify-between text-xs font-semibold mb-1.5">
-                    <span class="text-gray-300">图片类 (Images)</span>
-                    <span class="text-white">{{ mediaStats.images.count }} 个 / {{ mediaStats.images.size }}</span>
-                  </div>
-                  <n-progress 
-                    type="line" 
-                    :percentage="parseFloat(mediaStats.images.percent.toFixed(1))" 
-                    status="info" 
-                    processing
-                    :show-indicator="true" 
-                  />
-                </div>
-
-                <div>
-                  <div class="flex justify-between text-xs font-semibold mb-1.5">
-                    <span class="text-gray-300">视频类 (Videos)</span>
-                    <span class="text-white">{{ mediaStats.videos.count }} 个 / {{ mediaStats.videos.size }}</span>
-                  </div>
-                  <n-progress 
-                    type="line" 
-                    :percentage="parseFloat(mediaStats.videos.percent.toFixed(1))" 
-                    status="warning" 
-                    processing
-                    :show-indicator="true" 
-                  />
-                </div>
-
-                <div>
-                  <div class="flex justify-between text-xs font-semibold mb-1.5">
-                    <span class="text-gray-300">其他分片/归档 (Others)</span>
-                    <span class="text-white">{{ mediaStats.others.count }} 个 / {{ mediaStats.others.size }}</span>
-                  </div>
-                  <n-progress 
-                    type="line" 
-                    :percentage="parseFloat(mediaStats.others.percent.toFixed(1))" 
-                    status="default" 
-                    processing
-                    :show-indicator="true" 
-                  />
-                </div>
-              </div>
-            </n-card>
-          </n-gi>
-
-          <n-gi>
-            <n-card class="border border-white/5 h-full">
-              <h3 class="text-base font-bold text-white flex items-center gap-2 mb-2">
-                <Info class="w-5 h-5 text-purple-400" />
-                系统环境配置
-              </h3>
-              <p class="text-xs text-gray-400 mb-6">运行中的媒体网关后端核心环境参数列表。</p>
-              
-              <table class="w-full text-xs text-left border-collapse select-text">
-                <tbody>
-                  <tr class="border-b border-white/5">
-                    <td class="py-3 text-gray-400 font-medium">接口鉴权模式</td>
-                    <td class="py-3 text-right text-white font-semibold">
-                      <n-tag size="small" :type="health?.is_private ? 'error' : 'success'">
-                        {{ health?.is_private ? '私有受控鉴权' : '公共开放托管' }}
-                      </n-tag>
-                    </td>
-                  </tr>
-                  <tr class="border-b border-white/5">
-                    <td class="py-3 text-gray-400 font-medium">数据库连接驱动</td>
-                    <td class="py-3 text-right text-gray-200 font-mono font-bold uppercase">
-                      {{ health?.storage_driver || health?.database_driver || 'SQLITE' }}
-                    </td>
-                  </tr>
-                  <tr class="border-b border-white/5">
-                    <td class="py-3 text-gray-400 font-medium">鉴权保护规则数</td>
-                    <td class="py-3 text-right text-gray-200 font-bold">
-                      {{ health?.rules_count || 0 }} 个匹配过滤规则
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="py-3 text-gray-400 font-medium">服务器运行版本</td>
-                    <td class="py-3 text-right text-cyan-400 font-mono font-bold">
-                      v1.2.0-release
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </n-card>
-          </n-gi>
-        </n-grid>
-
+          <div>
+            <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
+              <span>其他分片/归档 (Others)</span>
+              <span id="chart_other_txt" style="font-weight: 600;">
+                {{ mediaStats.others.count }} 个 ({{ mediaStats.others.percent.toFixed(0) }}%) - {{ mediaStats.others.size }}
+              </span>
+            </div>
+            <div style="height: 8px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+              <div id="chart_other_bar" :style="{ width: mediaStats.others.percent + '%' }" style="height: 100%; background: #9ca3af; transition: width 1s;"></div>
+            </div>
+          </div>
+        </div>
       </div>
-    </n-spin>
+
+      <!-- Server Environment -->
+      <div class="m3-card">
+        <h2 class="section-title">
+          <span class="material-symbols-rounded" style="color: hsl(var(--md-sys-color-success));">info</span>
+          系统环境配置
+        </h2>
+        <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">运行中的媒体网关后端核心环境参数。</p>
+        
+        <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
+          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">接口鉴权状态</td>
+            <td id="env_auth_state" style="padding: 10px 0; text-align: right; font-weight: 600;" :style="{ color: apiToken ? 'hsl(var(--md-sys-color-primary))' : 'var(--md-sys-color-error)' }">
+              {{ apiToken ? '已配置 (Bearer)' : '未配置' }}
+            </td>
+          </tr>
+          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">存储/数据库驱动</td>
+            <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; text-transform: uppercase;">
+              {{ health?.storage_driver || health?.database_driver || 'SQLITE' }}
+            </td>
+          </tr>
+          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">响应时区</td>
+            <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff;">UTC / Local</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">服务器版本</td>
+            <td style="padding: 10px 0; text-align: right; font-family: monospace; font-weight: 600; color: hsl(var(--md-sys-color-primary));">v1.2.0-release</td>
+          </tr>
+        </table>
+      </div>
+    </div>
   </div>
 </template>

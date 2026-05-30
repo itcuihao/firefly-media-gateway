@@ -1,21 +1,20 @@
 // API client and configuration utilities for Firefly Media Gateway
 
 export interface MediaAsset {
-  id: string
+  mediaId: string
+  provider: string
+  publicUrl: string
+  mimeType: string
+  sizeBytes: number
+  sha256?: string
   project: string
   usage: string
-  mimeType: string
-  fileSize: number
   status: string
-  tgFileId?: string
-  tgMessageId?: number
-  tgChatId?: string
-  discordMessageId?: string
-  discordChannelId?: string
-  s3Key?: string
   createdAt: string
   updatedAt: string
-  publicUrl: string
+  deletedAt?: string
+  isChunked?: boolean
+  chunkCount?: number
 }
 
 export interface HealthInfo {
