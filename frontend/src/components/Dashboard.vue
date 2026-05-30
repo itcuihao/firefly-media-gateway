@@ -181,26 +181,28 @@ onMounted(() => {
         <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">运行中的媒体网关后端核心环境参数。</p>
         
         <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">接口鉴权状态</td>
-            <td id="env_auth_state" style="padding: 10px 0; text-align: right; font-weight: 600;" :style="{ color: apiToken ? 'hsl(var(--md-sys-color-primary))' : 'var(--md-sys-color-error)' }">
-              {{ apiToken ? '已配置 (Bearer)' : '未配置' }}
-            </td>
-          </tr>
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">存储/数据库驱动</td>
-            <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; text-transform: uppercase;">
-              {{ health?.storage_driver || health?.database_driver || 'SQLITE' }}
-            </td>
-          </tr>
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">响应时区</td>
-            <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff;">UTC / Local</td>
-          </tr>
-          <tr>
-            <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">服务器版本</td>
-            <td style="padding: 10px 0; text-align: right; font-family: monospace; font-weight: 600; color: hsl(var(--md-sys-color-primary));">v1.2.0-release</td>
-          </tr>
+          <tbody>
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">接口鉴权状态</td>
+              <td id="env_auth_state" style="padding: 10px 0; text-align: right; font-weight: 600;" :style="{ color: apiToken ? 'hsl(var(--md-sys-color-primary))' : 'var(--md-sys-color-error)' }">
+                {{ apiToken ? '已配置 (Bearer)' : '未配置' }}
+              </td>
+            </tr>
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">存储/数据库驱动</td>
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; text-transform: uppercase;">
+                {{ health?.storage_driver || health?.database_driver || 'SQLITE' }}
+              </td>
+            </tr>
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">响应时区</td>
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff;">UTC / Local</td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">服务器版本</td>
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; font-weight: 600; color: hsl(var(--md-sys-color-primary));">v1.2.0-release</td>
+            </tr>
+          </tbody>
         </table>
       </div>
     </div>
