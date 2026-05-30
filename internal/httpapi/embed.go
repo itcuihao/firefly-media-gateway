@@ -8,7 +8,7 @@ import (
 	"firefly-media-gateway/uiembed"
 )
 
-// frontendHandler 返回一个 HTTP handler，将 /debug/ui/ 路径下的请求映射到
+// frontendHandler 返回一个 HTTP handler，将 /admin/ 路径下的请求映射到
 // 嵌入的 Vue 3 + Naive UI 前端构建产物（frontend/dist）。
 // 对于不存在的资源路径，一律回退到 index.html（SPA History 路由兼容）。
 func (s *Server) frontendHandler() http.Handler {

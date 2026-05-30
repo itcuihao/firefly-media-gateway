@@ -112,10 +112,10 @@ if [ "$DEPLOY_OPTION" = "1" ]; then
     log "启动 Docker 容器组..."
     if [ "$MODE" = "proxy" ]; then
         docker-compose --profile proxy up -d --build
-        ok "Docker 部署成功！访问地址: ${BASE_URL}/debug/ui/"
+        ok "Docker 部署成功！访问地址: ${BASE_URL}/admin/"
     else
         docker-compose up -d --build
-        ok "Docker 部署成功！访问地址: ${BASE_URL}/debug/ui/"
+        ok "Docker 部署成功！访问地址: ${BASE_URL}/admin/"
     fi
     
 elif [ "$DEPLOY_OPTION" = "2" ]; then
@@ -184,7 +184,7 @@ EOF
     log "服务状态："
     sudo systemctl status media-gateway --no-pager
     log "--------------------------------------------------------"
-    log "管理控制台访问路径: ${BASE_URL}/debug/ui/"
+    log "管理控制台访问路径: ${BASE_URL}/admin/"
     log "数据存放目录: ${DEPLOY_DIR}/data/"
     log "--------------------------------------------------------"
 else

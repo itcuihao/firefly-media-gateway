@@ -18,7 +18,7 @@ export default defineConfig(() => {
       vue(),
       tailwindcss()
     ],
-    base: '/debug/ui/',
+    base: '/admin/',
     build: {
       outDir: '../uiembed/dist',
       emptyOutDir: true,

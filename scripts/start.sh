@@ -125,7 +125,7 @@ case "$MODE" in
     ok "存储模式: ${STORAGE_MODE}"
     ok "数据库:   ${DATABASE_URL}"
     ok "后端地址: http://localhost:${APP_LISTEN_ADDR##*:}"
-    ok "前端 HMR: http://localhost:5173/debug/ui/"
+    ok "前端 HMR: http://localhost:5173/admin/"
     log "（/api/v1 请求自动代理到后端，Ctrl+C 停止所有进程）"
     log ""
 

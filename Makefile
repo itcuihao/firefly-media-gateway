@@ -41,7 +41,7 @@ frontend-build:
 dev:
 	@echo "🔧 启动本地开发环境..."
 	@echo "   后端: http://localhost:8080"
-	@echo "   前端 (Vite HMR): http://localhost:5173/debug/ui/"
+	@echo "   前端 (Vite HMR): http://localhost:5173/admin/"
 	@echo ""
 	@# 并发启动前端开发服务器和后端
 	@trap 'kill 0' SIGINT; \
