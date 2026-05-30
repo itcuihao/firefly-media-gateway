@@ -68,6 +68,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/media/{mediaId}", s.handleGetMedia)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/stream", s.handleStream)
 
+	// Short public URL for media access (same handlers)
+	mux.HandleFunc("GET /media/{mediaId}", s.handleGetMedia)
+	mux.HandleFunc("GET /media/{mediaId}/stream", s.handleStream)
+
 	// Provider verification endpoints
 	mux.HandleFunc("POST /api/v1/provider/telegram/verify", s.withAuth(s.handleTelegramVerify))
 	mux.HandleFunc("POST /api/v1/provider/telegram/chat-ids", s.withAuth(s.handleTelegramChatIDsPost))

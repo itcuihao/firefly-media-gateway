@@ -118,7 +118,7 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 
 	assetID := newUUID()
 	ext := extByMIME(mimeType)
-	publicURL := fmt.Sprintf("%s/api/v1/media/%s%s", s.publicBaseURL, assetID, ext)
+	publicURL := fmt.Sprintf("%s/media/%s%s", s.publicBaseURL, assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
@@ -183,7 +183,7 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 
 	assetID := newUUID()
 	ext := extByMIME(mimeType)
-	publicURL := fmt.Sprintf("%s/api/v1/media/%s%s", s.publicBaseURL, assetID, ext)
+	publicURL := fmt.Sprintf("%s/media/%s%s", s.publicBaseURL, assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
