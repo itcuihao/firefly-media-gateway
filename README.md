@@ -1,6 +1,12 @@
+<div align="center">
+  <img src="icon.png" width="120" alt="Firefly Media Gateway" />
+</div>
+
 # firefly-media-gateway
 
-Go 实现的媒体网关服务，提供统一上传、访问、删除与元数据查询接口。
+A self-hosted media storage gateway that uses Telegram as unlimited storage backend. Provides unified upload, access, deletion and metadata management via REST and S3-compatible APIs, with a built-in admin console.
+
+自托管的媒体存储网关，通过 Telegram 作为无限存储后端，提供统一的上传、访问、删除与元数据管理接口，支持 REST API 和 S3 兼容 API，内置管理控制台。
 
 ## 功能
 
