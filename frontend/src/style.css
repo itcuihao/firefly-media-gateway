@@ -304,6 +304,7 @@ body {
   display: none;
   flex-direction: column;
   gap: 24px;
+  width: 100%;
   animation: fadeIn 0.4s var(--easing-standard);
 }
 
