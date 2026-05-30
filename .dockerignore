@@ -1,0 +1,8 @@
+.git
+.github
+.gomodcache
+node_modules
+frontend/node_modules
+uiembed/dist
+workers
+*.md

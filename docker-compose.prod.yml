@@ -1,0 +1,14 @@
+services:
+  media-gateway:
+    image: firefly-media-gateway:latest
+    container_name: firefly-media-gateway
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - mg-data:/data
+    restart: unless-stopped
+
+volumes:
+  mg-data:
