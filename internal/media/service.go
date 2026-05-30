@@ -29,6 +29,7 @@ type UploadRequest struct {
 	DeclaredContentType string
 	Reader              io.Reader
 	IsMember            bool // Enable chunked upload for large videos
+	OverrideProvider    provider.StorageProvider
 }
 
 type Service struct {
@@ -58,9 +59,13 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		return Asset{}, fmt.Errorf("file name is required")
 	}
 
-	p, ok := s.providers[s.defaultProvider]
-	if !ok {
-		return Asset{}, fmt.Errorf("provider %q: %w", s.defaultProvider, ErrProviderDisabled)
+	p := req.OverrideProvider
+	if p == nil {
+		var ok bool
+		p, ok = s.providers[s.defaultProvider]
+		if !ok {
+			return Asset{}, fmt.Errorf("provider %q: %w", s.defaultProvider, ErrProviderDisabled)
+		}
 	}
 
 	// Read entire file to temp file
@@ -112,7 +117,8 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 	}
 
 	assetID := newUUID()
-	publicURL := fmt.Sprintf("%s/api/v1/media/%s", s.publicBaseURL, assetID)
+	ext := extByMIME(mimeType)
+	publicURL := fmt.Sprintf("%s/api/v1/media/%s%s", s.publicBaseURL, assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
@@ -176,7 +182,8 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 	}
 
 	assetID := newUUID()
-	publicURL := fmt.Sprintf("%s/api/v1/media/%s", s.publicBaseURL, assetID)
+	ext := extByMIME(mimeType)
+	publicURL := fmt.Sprintf("%s/api/v1/media/%s%s", s.publicBaseURL, assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
@@ -254,7 +261,7 @@ type StreamInfo struct {
 }
 
 // StreamAsset returns stream URLs for an asset
-func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error) {
+func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider provider.StorageProvider) (StreamInfo, error) {
 	asset, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return StreamInfo{}, err
@@ -263,9 +270,13 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 		return StreamInfo{}, ErrNotFound
 	}
 
-	p, ok := s.providers[asset.Provider]
-	if !ok {
-		return StreamInfo{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
+	p := overrideProvider
+	if p == nil {
+		var ok bool
+		p, ok = s.providers[asset.Provider]
+		if !ok {
+			return StreamInfo{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
+		}
 	}
 
 	if !asset.IsChunked {
@@ -325,7 +336,7 @@ func (s *Service) StreamAsset(ctx context.Context, id string) (StreamInfo, error
 	}, nil
 }
 
-func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
+func (s *Service) Delete(ctx context.Context, id string, overrideProvider provider.StorageProvider) (Asset, error) {
 	asset, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return Asset{}, err
@@ -334,9 +345,13 @@ func (s *Service) Delete(ctx context.Context, id string) (Asset, error) {
 		return asset, nil
 	}
 
-	p, ok := s.providers[asset.Provider]
-	if !ok {
-		return Asset{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
+	p := overrideProvider
+	if p == nil {
+		var ok bool
+		p, ok = s.providers[asset.Provider]
+		if !ok {
+			return Asset{}, fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
+		}
 	}
 
 	if asset.IsChunked {
@@ -454,6 +469,25 @@ func mediaKindByMIME(m string) string {
 		return "image"
 	case "video/mp4", "video/webm", "video/quicktime":
 		return "video"
+	default:
+		return ""
+	}
+}
+
+func extByMIME(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "video/quicktime":
+		return ".mov"
 	default:
 		return ""
 	}

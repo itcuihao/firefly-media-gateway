@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { ref, inject } from 'vue'
 import { apiRequest } from '../api'
+import WorkerManager from './WorkerManager.vue'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
 const verifierTab = ref('tg')
 
 // TG state
-const tgBotTokenInput = ref('')
+const tgBotTokenInput = ref(localStorage.getItem('media_gateway_tg_bot_token') || '')
+const tgChatIdInput = ref(localStorage.getItem('media_gateway_tg_chat_id') || '')
 const tgShowToken = ref(false)
 const tgVerifyLoading = ref(false)
 const tgChatsLoading = ref(false)
@@ -23,7 +25,8 @@ const tgBotProfile = ref({
 const tgChats = ref<{ id: number; title: string; type: string }[]>([])
 
 // Discord state
-const discordBotTokenInput = ref('')
+const discordBotTokenInput = ref(localStorage.getItem('media_gateway_discord_bot_token') || '')
+const discordGuildIdInput = ref(localStorage.getItem('media_gateway_discord_guild_id') || '')
 const discordShowToken = ref(false)
 const discordVerifyLoading = ref(false)
 const discordGuildsLoading = ref(false)
@@ -75,6 +78,8 @@ async function verifyTelegramBot() {
         username: '@' + (data.bot_info.username || '--')
       }
       showToast('Telegram 机器人验证成功！')
+      // Automatically load active group list upon successful verification
+      fetchTelegramChatIDsPost()
     } else {
       tgStatus.value = 'error'
       tgStatusTitle.value = '验证失败'
@@ -194,6 +199,24 @@ async function fetchDiscordGuilds() {
   }
 }
 
+function saveTelegramConfig() {
+  const token = tgBotTokenInput.value.trim()
+  const chatId = tgChatIdInput.value.trim()
+  
+  localStorage.setItem('media_gateway_tg_bot_token', token)
+  localStorage.setItem('media_gateway_tg_chat_id', chatId)
+  showToast('Telegram 机器人配置保存成功！')
+}
+
+function saveDiscordConfig() {
+  const token = discordBotTokenInput.value.trim()
+  const guildId = discordGuildIdInput.value.trim()
+  
+  localStorage.setItem('media_gateway_discord_bot_token', token)
+  localStorage.setItem('media_gateway_discord_guild_id', guildId)
+  showToast('Discord 机器人配置保存成功！')
+}
+
 function copyText(txt: string) {
   navigator.clipboard.writeText(txt).then(() => {
     showToast('已成功复制到剪贴板！')
@@ -208,6 +231,7 @@ function copyText(txt: string) {
     <div class="tab-nav">
       <button :class="['tab-btn', { active: verifierTab === 'tg' }]" @click="switchVerifierTab('tg')">Telegram 机器人验证</button>
       <button :class="['tab-btn', { active: verifierTab === 'discord' }]" @click="switchVerifierTab('discord')">Discord 机器人验证</button>
+      <button :class="['tab-btn', { active: verifierTab === 'worker' }]" @click="switchVerifierTab('worker')">CF Worker 代理验证</button>
     </div>
 
     <!-- TG Tab Content -->
@@ -234,14 +258,37 @@ function copyText(txt: string) {
               <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-top: 4px;">为空则默认加载后端的 <code>TELEGRAM_BOT_TOKEN</code> 环境变量</span>
             </div>
 
-            <div style="display: flex; gap: 12px; margin-top: 24px;">
+            <div class="form-field" style="margin-top: 16px;">
+              <label>默认 Chat ID / 群组 ID</label>
+              <div class="input-wrapper" style="display: flex; gap: 10px;">
+                <input v-model="tgChatIdInput" type="text" placeholder="例如：-1001234567890" style="flex: 1;" />
+                <select 
+                  v-if="tgChats.length > 0"
+                  @change="(e) => { tgChatIdInput = (e.target as HTMLSelectElement).value }"
+                  :value="tgChats.some(c => String(c.id) === tgChatIdInput) ? tgChatIdInput : ''"
+                  style="width: 200px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; color: #fff; padding: 12px; font-size: 14px; outline: none;"
+                >
+                  <option value="" style="background: #1e293b;">-- 选择群组 --</option>
+                  <option v-for="chat in tgChats" :key="chat.id" :value="String(chat.id)" style="background: #1e293b;">
+                    {{ chat.title }} ({{ chat.type }})
+                  </option>
+                </select>
+              </div>
+              <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-top: 4px;">为空则默认加载后端 <code>TELEGRAM_CHAT_ID</code> 环境变量</span>
+            </div>
+
+            <div style="display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap;">
               <button class="m3-btn m3-btn-primary" @click="verifyTelegramBot" :disabled="tgVerifyLoading">
                 <span class="material-symbols-rounded">verified_user</span>
-                <span>{{ tgVerifyLoading ? '验证中...' : '测试机器人连通性' }}</span>
+                <span>{{ tgVerifyLoading ? '验证中...' : '测试并获取群列表' }}</span>
               </button>
               <button class="m3-btn m3-btn-secondary" @click="fetchTelegramChatIDsPost" :disabled="tgChatsLoading">
-                <span class="material-symbols-rounded">chat_bubble</span>
-                <span>{{ tgChatsLoading ? '拉取中...' : '获取最近群组 ID' }}</span>
+                <span class="material-symbols-rounded">groups</span>
+                <span>{{ tgChatsLoading ? '获取中...' : '重新获取群列表' }}</span>
+              </button>
+              <button class="m3-btn m3-btn-secondary" @click="saveTelegramConfig">
+                <span class="material-symbols-rounded">save</span>
+                <span>保存配置</span>
               </button>
             </div>
           </div>
@@ -295,7 +342,10 @@ function copyText(txt: string) {
               <div class="chat-card-id">ID: <code>{{ chat.id }}</code></div>
               <div style="font-size:11px; color:hsl(var(--md-sys-color-primary)); margin-top:2px; text-transform: capitalize;">类型: {{ chat.type }}</div>
             </div>
-            <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="copyText(String(chat.id))">复制 ID</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="tgChatIdInput = String(chat.id); showToast('已成功填入此群组 ID，请记得保存！')">选用</button>
+              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="copyText(String(chat.id))">复制 ID</button>
+            </div>
           </div>
           <p v-if="tgChats.length === 0 && !tgChatsLoading" style="grid-column: 1/-1; text-align:center; color:hsl(var(--md-sys-color-on-surface-variant)); padding: 20px 0;">
             未检测到最新交互。请先向 Bot 所在的群组发送消息，然后重试。
@@ -328,7 +378,15 @@ function copyText(txt: string) {
               </div>
             </div>
 
-            <div style="display: flex; gap: 12px; margin-top: 24px;">
+            <div class="form-field" style="margin-top: 16px;">
+              <label>默认 Guild ID / 服务器 ID</label>
+              <div class="input-wrapper">
+                <input v-model="discordGuildIdInput" type="text" placeholder="例如：123456789012345678" />
+              </div>
+              <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-top: 4px;">为空则默认加载后端 <code>DISCORD_GUILD_ID</code> 环境变量</span>
+            </div>
+
+            <div style="display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap;">
               <button class="m3-btn m3-btn-primary" @click="verifyDiscordBot" :disabled="discordVerifyLoading">
                 <span class="material-symbols-rounded">verified_user</span>
                 <span>{{ discordVerifyLoading ? '验证中...' : '测试 Bot 鉴权' }}</span>
@@ -336,6 +394,10 @@ function copyText(txt: string) {
               <button class="m3-btn m3-btn-secondary" @click="fetchDiscordGuilds" :disabled="discordGuildsLoading">
                 <span class="material-symbols-rounded">dns</span>
                 <span>{{ discordGuildsLoading ? '拉取中...' : '拉取加入的服务器' }}</span>
+              </button>
+              <button class="m3-btn m3-btn-secondary" @click="saveDiscordConfig">
+                <span class="material-symbols-rounded">save</span>
+                <span>保存配置</span>
               </button>
             </div>
           </div>
@@ -389,7 +451,10 @@ function copyText(txt: string) {
               <div class="chat-card-id">Guild ID: <code>{{ guild.id }}</code></div>
               <div style="font-size:11px; color:hsl(var(--md-sys-color-secondary)); margin-top:2px;">权限权重: {{ guild.permissions || '默认' }}</div>
             </div>
-            <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="copyText(guild.id)">复制 ID</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="discordGuildIdInput = String(guild.id); showToast('已成功填入此服务器 ID，请记得保存！')">选用</button>
+              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 12px;" @click="copyText(guild.id)">复制 ID</button>
+            </div>
           </div>
           <p v-if="discordGuilds.length === 0 && !discordGuildsLoading" style="grid-column: 1/-1; text-align:center; color:hsl(var(--md-sys-color-on-surface-variant)); padding: 20px 0;">
             该机器人目前未加入任何服务器，请先邀请机器人到您的 Discord 服务器中。
@@ -397,6 +462,11 @@ function copyText(txt: string) {
           <p v-if="discordGuildsLoading" style="grid-column: 1/-1; text-align:center; color:hsl(var(--md-sys-color-on-surface-variant));">正在拉取加入的服务器...</p>
         </div>
       </div>
+    </div>
+
+    <!-- Cloudflare Worker Tab Content -->
+    <div v-if="verifierTab === 'worker'" style="display: flex; flex-direction: column; gap: 24px;">
+      <WorkerManager />
     </div>
   </div>
 </template>

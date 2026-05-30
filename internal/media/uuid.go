@@ -15,7 +15,7 @@ func newUUID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 
 	return fmt.Sprintf(
-		"%08x-%04x-%04x-%04x-%012x",
+		"%08x%04x%04x%04x%012x",
 		b[0:4],
 		b[4:6],
 		b[6:8],

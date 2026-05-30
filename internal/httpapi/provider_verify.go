@@ -286,3 +286,80 @@ func (s *Server) handleDiscordGuilds(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, guilds)
 }
+
+type workerVerifyRequest struct {
+	URL   string `json:"url"`
+	Token string `json:"token"`
+}
+
+func (s *Server) handleWorkerVerify(w http.ResponseWriter, r *http.Request) {
+	var req workerVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		s.writeError(w, r, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	url := strings.TrimSpace(req.URL)
+	if url == "" {
+		url = s.workerBaseURL
+	}
+	url = strings.TrimSpace(url)
+	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "https://" + url
+	}
+	token := strings.TrimSpace(req.Token)
+	if token == "" {
+		token = s.workerAuthToken
+	}
+
+	if url == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Worker URL is required", nil)
+		return
+	}
+
+	// Clean trailing slash
+	url = strings.TrimRight(url, "/")
+
+	// Ping the Worker's get endpoint to test connection
+	pingURL := fmt.Sprintf("%s/get?file_id=test_ping_conn", url)
+	client := &http.Client{Timeout: 10 * time.Second}
+	
+	workerReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, pingURL, nil)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "failed to create worker request", err)
+		return
+	}
+
+	if token != "" {
+		workerReq.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := client.Do(workerReq)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": fmt.Sprintf("无法连接到 Cloudflare Worker: %v", err),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// If token is invalid, Worker returns 401 Unauthorized.
+	// Otherwise, it might return 400 (missing param/invalid ID) or 404 (not found).
+	// Therefore, any status other than 401 indicates valid authorization/connectivity.
+	if resp.StatusCode == http.StatusUnauthorized {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": "鉴权失败: Worker Token 无效 (HTTP 401)",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"info": map[string]any{
+			"status_code": resp.StatusCode,
+			"url":         url,
+		},
+	})
+}

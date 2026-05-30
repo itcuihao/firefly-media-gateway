@@ -8,9 +8,17 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"strings"
 	"time"
 )
+
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+
+func escapeQuotes(s string) string {
+	return quoteEscaper.Replace(s)
+}
 
 // WorkerProvider 通过 Worker API 进行文件操作
 type WorkerProvider struct {
@@ -41,9 +49,17 @@ func (p *WorkerProvider) Upload(ctx context.Context, in UploadInput) (UploadResu
 	mw := multipart.NewWriter(&body)
 
 	// 添加文件
-	part, err := mw.CreateFormFile("file", in.FileName)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(in.FileName)))
+	contentType := in.MIMEType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	h.Set("Content-Type", contentType)
+
+	part, err := mw.CreatePart(h)
 	if err != nil {
-		return UploadResult{}, fmt.Errorf("create form file: %w", err)
+		return UploadResult{}, fmt.Errorf("create form part: %w", err)
 	}
 	if _, err := io.Copy(part, in.Reader); err != nil {
 		return UploadResult{}, fmt.Errorf("copy file body: %w", err)

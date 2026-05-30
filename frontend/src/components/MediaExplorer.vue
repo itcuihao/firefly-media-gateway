@@ -30,6 +30,7 @@ const uploadDialogOpen = ref(false)
 const uploadProject = ref('interactive-video')
 const uploadUsage = ref('cover')
 const uploadIsMember = ref(false)
+const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 // Computed dynamic options for filters based on loaded media list
@@ -109,6 +110,48 @@ function closeUploadDialog() {
   }
 }
 
+function convertImageToWebp(file: File, quality = 0.85): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    if (file.type === 'image/webp') {
+      resolve(file)
+      return
+    }
+
+    const reader = new FileReader()
+    reader.readAsDataURL(file)
+    reader.onload = (event) => {
+      const img = new Image()
+      img.src = event.target?.result as string
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('Failed to get 2D context'))
+          return
+        }
+        ctx.drawImage(img, 0, 0)
+        
+        canvas.toBlob((blob) => {
+          if (blob) {
+            resolve(blob)
+          } else {
+            reject(new Error('Canvas conversion to webp blob failed'))
+          }
+        }, 'image/webp', quality)
+      }
+      img.onerror = (err) => {
+        reject(err)
+      }
+    }
+    reader.onerror = (err) => {
+      reject(err)
+    }
+  })
+}
+
 async function submitUploadFile() {
   const fileInput = fileInputRef.value
   if (!fileInput || !fileInput.files || !fileInput.files[0]) {
@@ -116,8 +159,28 @@ async function submitUploadFile() {
     return
   }
 
+  let fileToUpload = fileInput.files[0]
+  const isJpgOrPng = fileToUpload.type === 'image/jpeg' || fileToUpload.type === 'image/png'
+
+  if (isJpgOrPng && uploadAutoWebp.value) {
+    showToast('正在本地优化压缩并转换为 WebP 格式...', 'success')
+    try {
+      const webpBlob = await convertImageToWebp(fileToUpload)
+      let newName = fileToUpload.name
+      const lastDot = newName.lastIndexOf('.')
+      if (lastDot !== -1) {
+        newName = newName.substring(0, lastDot) + '.webp'
+      } else {
+        newName = newName + '.webp'
+      }
+      fileToUpload = new File([webpBlob], newName, { type: 'image/webp' })
+    } catch (err: any) {
+      console.warn('WebP conversion failed, fallback to original:', err)
+    }
+  }
+
   const form = new FormData()
-  form.append('file', fileInput.files[0])
+  form.append('file', fileToUpload)
   form.append('project', uploadProject.value.trim())
   form.append('usage', uploadUsage.value)
   form.append('member', uploadIsMember.value ? 'true' : 'false')
@@ -363,6 +426,13 @@ onMounted(() => {
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
               <input type="checkbox" v-model="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
               <span>是否启用大文件分片上传 (需要会员身份)</span>
+            </label>
+          </div>
+
+          <div class="form-field" style="margin-top: 8px;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+              <input type="checkbox" v-model="uploadAutoWebp" style="accent-color: hsl(var(--md-sys-color-primary));" />
+              <span>自动优化图片并转换为 WebP 格式（缩减文件体积，加速网页加载）</span>
             </label>
           </div>
 

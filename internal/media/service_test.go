@@ -79,7 +79,7 @@ func TestDeleteChunkedDeletesEveryChunk(t *testing.T) {
 	p := &fakeProvider{name: "fake"}
 	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
 
-	asset, err := svc.Delete(context.Background(), "asset-1")
+	asset, err := svc.Delete(context.Background(), "asset-1", nil)
 	if err != nil {
 		t.Fatalf("delete chunked asset: %v", err)
 	}

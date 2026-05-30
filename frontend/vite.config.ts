@@ -1,50 +1,13 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
-import http from 'http'
-
-// Helper to check if a backend port is listening and responsive
-function checkPort(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port: port,
-        path: '/api/v1/health',
-        method: 'GET',
-        timeout: 200,
-      },
-      (res) => {
-        resolve(res.statusCode === 200)
-      }
-    )
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => {
-      req.destroy()
-      resolve(false)
-    })
-    req.end()
-  })
-}
 
 // https://vite.dev/config/
-export default defineConfig(async () => {
-  // Parse port from environment variable if present
+export default defineConfig(() => {
+  // Parse port from environment variable if present, defaulting to 8088
   const listenAddr = process.env.APP_LISTEN_ADDR || ''
-  const envPort = listenAddr.includes(':') ? parseInt(listenAddr.split(':').pop() || '') : null
-
-  let activePort = 8080
-
-  if (envPort && await checkPort(envPort)) {
-    activePort = envPort
-  } else if (await checkPort(8088)) {
-    activePort = 8088
-  } else if (await checkPort(8080)) {
-    activePort = 8080
-  } else {
-    // If no running server is detected, fall back to the env port or 8080 default
-    activePort = envPort || 8080
-  }
+  const envPort = listenAddr.includes(':') ? listenAddr.split(':').pop() : '8088'
+  const activePort = envPort || '8088'
 
   const proxyTarget = process.env.VITE_PROXY_TARGET || `http://127.0.0.1:${activePort}`
 
@@ -71,4 +34,5 @@ export default defineConfig(async () => {
     }
   }
 })
+
 

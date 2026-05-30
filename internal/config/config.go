@@ -126,12 +126,17 @@ func resolveDatabaseDriver(driver, databaseURL string) string {
 		return driver
 	}
 
-	dsn := strings.ToLower(strings.TrimSpace(databaseURL))
-	if dsn == "" {
+	if databaseURL == "" {
 		return "sqlite"
 	}
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		return "postgres"
+
+	parts := strings.SplitN(databaseURL, ":", 2)
+	if len(parts) > 0 {
+		scheme := strings.ToLower(parts[0])
+		if scheme == "postgresql" {
+			return "postgres"
+		}
+		return scheme
 	}
 	return "sqlite"
 }

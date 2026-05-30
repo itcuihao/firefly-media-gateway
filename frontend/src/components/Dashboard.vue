@@ -220,9 +220,27 @@ onMounted(() => {
               </td>
             </tr>
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">存储/数据库驱动</td>
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">存储运行模式</td>
               <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; text-transform: uppercase;">
-                {{ health?.storage_driver || health?.database_driver || 'SQLITE' }}
+                {{ health?.storage_driver || 'DIRECT' }}
+              </td>
+            </tr>
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">数据库驱动</td>
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; text-transform: uppercase;">
+                {{ health?.database_driver || 'SQLITE' }}
+              </td>
+            </tr>
+            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">CF Worker 状态</td>
+              <td style="padding: 10px 0; text-align: right; font-weight: 600;" :style="{ color: health?.worker_url ? 'hsl(var(--md-sys-color-success))' : 'hsl(var(--md-sys-color-on-surface-variant))' }">
+                {{ health?.worker_url ? '已配置' : '未连接/未配置' }}
+              </td>
+            </tr>
+            <tr v-if="health?.worker_url" style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">CF Worker 地址</td>
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; font-size: 11px;">
+                {{ health?.worker_url }}
               </td>
             </tr>
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">

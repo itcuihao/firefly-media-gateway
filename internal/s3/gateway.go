@@ -181,7 +181,7 @@ func (g *Gateway) handleDeleteObject(w http.ResponseWriter, r *http.Request, buc
 		return
 	}
 
-	_, err := g.mediaService.Delete(ctx, assetID)
+	_, err := g.mediaService.Delete(ctx, assetID, nil)
 	if err != nil {
 		g.writeError(w, "DeleteFailed", err.Error(), http.StatusInternalServerError)
 		return

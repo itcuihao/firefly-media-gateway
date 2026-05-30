@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"firefly-media-gateway/internal/media"
+	"firefly-media-gateway/internal/provider"
 )
 
 const maxRequestBodyBytes int64 = 201 * 1024 * 1024 // 200MB + 1MB buffer
@@ -24,16 +25,24 @@ type Server struct {
 	svc              *media.Service
 	authToken        string
 	telegramBotToken string
+	workerBaseURL    string
+	workerAuthToken  string
 	privateRules     []string
+	databaseDriver   string
+	storageMode      string
 	logger           *log.Logger
 }
 
-func NewServer(svc *media.Service, authToken, telegramBotToken string, privateRules []string, logger *log.Logger) *Server {
+func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken string, privateRules []string, databaseDriver, storageMode string, logger *log.Logger) *Server {
 	return &Server{
 		svc:              svc,
 		authToken:        authToken,
 		telegramBotToken: telegramBotToken,
+		workerBaseURL:    workerBaseURL,
+		workerAuthToken:  workerAuthToken,
 		privateRules:     privateRules,
+		databaseDriver:   databaseDriver,
+		storageMode:      storageMode,
 		logger:           logger,
 	}
 }
@@ -64,14 +73,36 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/provider/telegram/chat-ids", s.withAuth(s.handleTelegramChatIDsPost))
 	mux.HandleFunc("POST /api/v1/provider/discord/verify", s.withAuth(s.handleDiscordVerify))
 	mux.HandleFunc("POST /api/v1/provider/discord/guilds", s.withAuth(s.handleDiscordGuilds))
+	mux.HandleFunc("POST /api/v1/provider/worker/verify", s.withAuth(s.handleWorkerVerify))
 
 	return s.withLogging(mux)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	storageMode := s.storageMode
+	workerURL := s.workerBaseURL
+
+	if strings.ToLower(r.Header.Get("X-Storage-Mode")) == "proxy" || r.Header.Get("X-Worker-Base-URL") != "" {
+		storageMode = "proxy"
+		workerURL = strings.TrimSpace(r.Header.Get("X-Worker-Base-URL"))
+		if workerURL == "" {
+			workerURL = s.workerBaseURL
+		}
+	}
+
+	if workerURL != "" {
+		if !strings.HasPrefix(workerURL, "http://") && !strings.HasPrefix(workerURL, "https://") {
+			workerURL = "https://" + workerURL
+		}
+		workerURL = strings.TrimRight(workerURL, "/")
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"time":   time.Now().UTC(),
+		"status":          "ok",
+		"time":            time.Now().UTC(),
+		"database_driver": s.databaseDriver,
+		"storage_driver":  storageMode,
+		"worker_url":      workerURL,
 	})
 }
 
@@ -97,6 +128,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	usage := strings.TrimSpace(r.FormValue("usage"))
 	isMember := r.FormValue("member") == "true" || r.FormValue("is_member") == "true"
 
+	overrideProvider := s.resolveWorkerProvider(r)
+
 	asset, err := s.svc.Upload(r.Context(), media.UploadRequest{
 		Project:             project,
 		Usage:               usage,
@@ -104,6 +137,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		DeclaredContentType: header.Header.Get("Content-Type"),
 		Reader:              file,
 		IsMember:            isMember,
+		OverrideProvider:    overrideProvider,
 	})
 	if err != nil {
 		s.writeDomainError(w, r, err)
@@ -118,7 +152,7 @@ func (s *Server) handleGetMedia(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
-	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	mediaID := cleanMediaID(r.PathValue("mediaId"))
 	if mediaID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
 		return
@@ -134,7 +168,7 @@ func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	mediaID := cleanMediaID(r.PathValue("mediaId"))
 	if mediaID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
 		return
@@ -144,7 +178,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
-	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	mediaID := cleanMediaID(r.PathValue("mediaId"))
 	if mediaID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
 		return
@@ -162,7 +196,9 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamInfo, err := s.svc.StreamAsset(r.Context(), mediaID)
+	overrideProvider := s.resolveWorkerProvider(r)
+
+	streamInfo, err := s.svc.StreamAsset(r.Context(), mediaID, overrideProvider)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
@@ -204,7 +240,8 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	defer resp.Body.Close()
 
 	copyMediaHeaders(w.Header(), resp.Header)
-	if w.Header().Get("Content-Type") == "" && streamInfo.MIMEType != "" {
+	// Force the verified MIMEType from database to avoid upstream generic octet-stream overrides
+	if streamInfo.MIMEType != "" {
 		w.Header().Set("Content-Type", streamInfo.MIMEType)
 	}
 	if w.Header().Get("Accept-Ranges") == "" {
@@ -277,13 +314,15 @@ func copyMediaHeaders(dst, src http.Header) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	mediaID := strings.TrimSpace(r.PathValue("mediaId"))
+	mediaID := cleanMediaID(r.PathValue("mediaId"))
 	if mediaID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "mediaId is required", nil)
 		return
 	}
 
-	asset, err := s.svc.Delete(r.Context(), mediaID)
+	overrideProvider := s.resolveWorkerProvider(r)
+
+	asset, err := s.svc.Delete(r.Context(), mediaID, overrideProvider)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
@@ -623,4 +662,42 @@ func extByMIME(mimeType string) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Server) resolveWorkerProvider(r *http.Request) provider.StorageProvider {
+	if strings.ToLower(r.Header.Get("X-Storage-Mode")) != "proxy" && r.Header.Get("X-Worker-Base-URL") == "" {
+		return nil
+	}
+	wURL := strings.TrimSpace(r.Header.Get("X-Worker-Base-URL"))
+	wToken := strings.TrimSpace(r.Header.Get("X-Worker-Auth-Token"))
+	if wURL == "" {
+		wURL = s.workerBaseURL
+	}
+	if wToken == "" {
+		wToken = s.workerAuthToken
+	}
+	if wURL == "" {
+		return nil
+	}
+	
+	// Sanitize URL and prepends https:// if missing
+	wURL = strings.TrimSpace(wURL)
+	if !strings.HasPrefix(wURL, "http://") && !strings.HasPrefix(wURL, "https://") {
+		wURL = "https://" + wURL
+	}
+	wURL = strings.TrimRight(wURL, "/")
+	
+	return provider.NewWorkerProvider(wURL, wToken)
+}
+
+func cleanMediaID(rawID string) string {
+	rawID = strings.TrimSpace(rawID)
+	if idx := strings.LastIndex(rawID, "."); idx != -1 {
+		ext := strings.ToLower(rawID[idx:])
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".mp4", ".webm", ".mov", ".ogg", ".mp3", ".wav":
+			return rawID[:idx]
+		}
+	}
+	return rawID
 }

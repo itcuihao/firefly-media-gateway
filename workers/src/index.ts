@@ -242,7 +242,46 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
       );
     }
 
-    const doc = tgData.result.document;
+    let doc = tgData.result.document;
+    let mimeType = '';
+    let fileSize = 0;
+
+    if (doc) {
+      mimeType = doc.mime_type || '';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.sticker) {
+      doc = tgData.result.sticker;
+      mimeType = 'image/webp';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.photo && Array.isArray(tgData.result.photo) && tgData.result.photo.length > 0) {
+      doc = tgData.result.photo[tgData.result.photo.length - 1];
+      mimeType = 'image/jpeg';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.animation) {
+      doc = tgData.result.animation;
+      mimeType = doc.mime_type || 'video/mp4';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.video) {
+      doc = tgData.result.video;
+      mimeType = doc.mime_type || 'video/mp4';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.audio) {
+      doc = tgData.result.audio;
+      mimeType = doc.mime_type || 'audio/mpeg';
+      fileSize = doc.file_size || 0;
+    } else if (tgData.result.voice) {
+      doc = tgData.result.voice;
+      mimeType = doc.mime_type || 'audio/ogg';
+      fileSize = doc.file_size || 0;
+    }
+
+    if (!doc) {
+      return error(
+        `No supported media found in Telegram response: ${JSON.stringify(tgData.result)}`,
+        'TG_MEDIA_NOT_FOUND',
+        502
+      );
+    }
 
     // 构造返回
     const response: UploadResponse = {
@@ -253,8 +292,8 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
       file_id: doc.file_id,
       file_unique_id: doc.file_unique_id,
       file_url: '', // 稍后填充
-      mime_type: doc.mime_type,
-      file_size: doc.file_size,
+      mime_type: mimeType || doc.mime_type || '',
+      file_size: fileSize || doc.file_size || 0,
       timestamp: new Date().toISOString(),
     };
 
