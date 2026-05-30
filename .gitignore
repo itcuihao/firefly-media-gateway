@@ -4,3 +4,6 @@
 data/
 workers/node_modules/
 workers/.wrangler/
+server
+node_modules/
+dist/
