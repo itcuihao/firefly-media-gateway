@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8080:8080"
+      - "${HOST_PORT:-9090}:8080"
     volumes:
       - mg-data:/data
     restart: unless-stopped
