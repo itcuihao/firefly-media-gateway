@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"firefly-media-gateway/internal/provider"
+
+	qtfaststart "github.com/qkzsky/go-qt-faststart"
 )
 
 const (
@@ -92,6 +95,17 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytesChunk, ErrFileTooLarge)
 	}
 
+	// Apply MP4 faststart (move moov atom to file head) for streaming playback
+	if mediaKind == "video" && mimeType == "video/mp4" {
+		if fsFile, err := fastStartMP4(tmpFile); err != nil {
+			log.Printf("mp4 faststart failed, using original file: %v", err)
+		} else if fsFile != tmpFile {
+			defer os.Remove(fsFile.Name())
+			defer fsFile.Close()
+			tmpFile = fsFile
+		}
+	}
+
 	// Check if chunking is needed
 	if sizeBytes <= chunkSize || !req.IsMember {
 		return s.uploadSingle(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
@@ -118,7 +132,7 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 
 	assetID := newUUID()
 	ext := extByMIME(mimeType)
-	publicURL := fmt.Sprintf("%s/media/%s%s", s.publicBaseURL, assetID, ext)
+	publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
@@ -183,7 +197,7 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 
 	assetID := newUUID()
 	ext := extByMIME(mimeType)
-	publicURL := fmt.Sprintf("%s/media/%s%s", s.publicBaseURL, assetID, ext)
+	publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
 
 	sha := shaHex
 	asset, err := s.repo.Create(ctx, CreateAssetInput{
@@ -491,4 +505,48 @@ func extByMIME(mimeType string) string {
 	default:
 		return ""
 	}
+}
+
+// fastStartMP4 moves the moov atom to the beginning of an MP4 file for streaming.
+// Returns a new temp file with the faststarted data, or the original file if already faststart.
+// Caller is responsible for cleaning up both the original and returned temp files.
+func fastStartMP4(tmpFile *os.File) (*os.File, error) {
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	f, err := qtfaststart.Read(tmpFile)
+	if err != nil {
+		return nil, fmt.Errorf("parse mp4: %w", err)
+	}
+
+	if f.FastStartEnabled() {
+		return tmpFile, nil
+	}
+
+	if err := f.Convert(false); err != nil {
+		return nil, fmt.Errorf("convert: %w", err)
+	}
+
+	out, err := os.CreateTemp("", "media-faststart-*")
+	if err != nil {
+		return nil, fmt.Errorf("create output temp: %w", err)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return nil, fmt.Errorf("read converted data: %w", err)
+	}
+	if _, err := out.Write(data); err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return nil, fmt.Errorf("write faststarted data: %w", err)
+	}
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return nil, fmt.Errorf("seek output: %w", err)
+	}
+	return out, nil
 }

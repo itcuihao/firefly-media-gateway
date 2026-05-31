@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,19 +28,21 @@ type Server struct {
 	telegramBotToken string
 	workerBaseURL    string
 	workerAuthToken  string
+	publicBaseURL    string
 	privateRules     []string
 	databaseDriver   string
 	storageMode      string
 	logger           *log.Logger
 }
 
-func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken string, privateRules []string, databaseDriver, storageMode string, logger *log.Logger) *Server {
+func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode string, logger *log.Logger) *Server {
 	return &Server{
 		svc:              svc,
 		authToken:        authToken,
 		telegramBotToken: telegramBotToken,
 		workerBaseURL:    workerBaseURL,
 		workerAuthToken:  workerAuthToken,
+		publicBaseURL:    strings.TrimRight(publicBaseURL, "/"),
 		privateRules:     privateRules,
 		databaseDriver:   databaseDriver,
 		storageMode:      storageMode,
@@ -604,6 +607,15 @@ func (s *Server) isAssetPublic(asset media.Asset) bool {
 }
 
 func (s *Server) signAssetURL(asset media.Asset) media.Asset {
+	// Build full public URL: extract path from legacy full URLs, then prepend current PUBLIC_BASE_URL
+	path := asset.PublicURL
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		if u, err := url.Parse(path); err == nil {
+			path = u.Path
+		}
+	}
+	asset.PublicURL = s.publicBaseURL + path
+
 	if s.isAssetPublic(asset) {
 		return asset
 	}

@@ -44,7 +44,7 @@ func main() {
 	}
 
 	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
-	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), logger)
+	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PublicBaseURL, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), logger)
 
 	// 创建 S3 Gateway（可选）
 	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)

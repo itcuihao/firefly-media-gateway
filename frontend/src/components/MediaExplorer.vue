@@ -32,6 +32,64 @@ const uploadUsage = ref('cover')
 const uploadIsMember = ref(false)
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const selectedFileKind = ref<'image' | 'video' | null>(null)
+const selectedFileName = ref('')
+const dragOver = ref(false)
+
+const sizeLimitHint = computed(() => {
+  if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp)'
+  if (selectedFileKind.value === 'video') return '视频最大 120MB (mp4/webm/mov)'
+  return '文件最大支持限制：图片 10MB，视频 120MB'
+})
+
+function onFileSelected() {
+  const file = fileInputRef.value?.files?.[0]
+  if (!file) {
+    selectedFileKind.value = null
+    selectedFileName.value = ''
+    return
+  }
+  selectedFileName.value = file.name
+  if (file.type.startsWith('image/')) {
+    selectedFileKind.value = 'image'
+  } else if (file.type.startsWith('video/')) {
+    selectedFileKind.value = 'video'
+    uploadUsage.value = 'scene'
+  } else {
+    selectedFileKind.value = null
+  }
+}
+
+function applyFile(file: File) {
+  const dt = new DataTransfer()
+  dt.items.add(file)
+  if (fileInputRef.value) {
+    fileInputRef.value.files = dt.files
+  }
+  selectedFileName.value = file.name
+  if (file.type.startsWith('image/')) {
+    selectedFileKind.value = 'image'
+  } else if (file.type.startsWith('video/')) {
+    selectedFileKind.value = 'video'
+    uploadUsage.value = 'scene'
+  } else {
+    selectedFileKind.value = null
+  }
+}
+
+function onDrop(e: DragEvent) {
+  dragOver.value = false
+  const file = e.dataTransfer?.files?.[0]
+  if (file && (file.type.startsWith('image/') || file.type.startsWith('video/'))) {
+    applyFile(file)
+  }
+}
+
+function clearSelectedFile() {
+  selectedFileKind.value = null
+  selectedFileName.value = ''
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
 
 // Computed dynamic options for filters based on loaded media list
 const projectsList = computed(() => {
@@ -105,6 +163,9 @@ function openUploadDialog() {
 
 function closeUploadDialog() {
   uploadDialogOpen.value = false
+  selectedFileKind.value = null
+  selectedFileName.value = ''
+  dragOver.value = false
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
   }
@@ -223,6 +284,22 @@ function copyText(txt: string) {
   })
 }
 
+function extByMIME(mime: string) {
+  const map: Record<string, string> = {
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
+    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+  }
+  return map[mime] || ''
+}
+
+function downloadMediaAsset(asset: any) {
+  const ext = extByMIME(asset.mimeType)
+  const a = document.createElement('a')
+  a.href = asset.publicUrl
+  a.download = asset.mediaId + ext
+  a.click()
+}
+
 function formatBytes(bytes: number) {
   if (!bytes || bytes === 0) return '0 B'
   const k = 1024
@@ -298,9 +375,16 @@ onMounted(() => {
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
           <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
-          <span v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" class="material-symbols-rounded file-icon" style="color: hsl(var(--md-sys-color-secondary));">video_library</span>
+          <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width:100%; height:100%; object-fit:cover;"></video>
           <span v-else class="material-symbols-rounded file-icon">description</span>
-          
+
+          <span v-if="asset.mimeType.startsWith('image/')" class="media-type-icon media-type-image">
+            <span class="material-symbols-rounded" style="font-size: 14px;">image</span>
+          </span>
+          <span v-else-if="asset.mimeType.startsWith('video/')" class="media-type-icon media-type-video">
+            <span class="material-symbols-rounded" style="font-size: 14px;">play_arrow</span>
+          </span>
+
           <span v-if="asset.isChunked" class="badge badge-primary" style="position: absolute; top: 8px; left: 8px;">分片上传</span>
         </div>
         <div class="media-card-info">
@@ -350,9 +434,8 @@ onMounted(() => {
             <td>
               <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
                 <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
-                <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">
-                  {{ asset.mimeType.startsWith('video/') ? 'video_library' : 'description' }}
-                </span>
+                <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+                <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">description</span>
               </div>
             </td>
             <td>
@@ -400,48 +483,67 @@ onMounted(() => {
           <button class="m3-dialog-close" @click="closeUploadDialog">&times;</button>
         </div>
         <div class="m3-dialog-body">
-          <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">
-            文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 120MB (mp4/webm/mov)。
-          </p>
+          <div class="upload-drop-zone"
+               :class="{ 'drop-active': dragOver, 'has-file': selectedFileName }"
+               @click="fileInputRef?.click()"
+               @dragover.prevent="dragOver = true"
+               @dragleave.prevent="dragOver = false"
+               @drop.prevent="onDrop">
+            <input ref="fileInputRef" type="file" accept="image/*,video/*" @change="onFileSelected" style="display: none;" />
+            <template v-if="!selectedFileName">
+              <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary)); margin-bottom: 8px;">cloud_upload</span>
+              <p style="font-size: 14px; color: #fff; margin: 0;">点击或拖拽文件到此处</p>
+              <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 4px 0 0;">{{ sizeLimitHint }}</p>
+            </template>
+            <template v-else>
+              <span class="material-symbols-rounded" style="font-size: 28px; color: hsl(var(--md-sys-color-primary));">
+                {{ selectedFileKind === 'video' ? 'videocam' : 'image' }}
+              </span>
+              <div style="flex: 1; min-width: 0; margin-left: 12px;">
+                <p style="font-size: 14px; color: #fff; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ selectedFileName }}</p>
+                <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 2px 0 0;">
+                  {{ selectedFileKind === 'image' ? '图片文件' : '视频文件' }}
+                </p>
+              </div>
+              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 4px 8px; flex-shrink: 0;" @click.stop="clearSelectedFile">
+                <span class="material-symbols-rounded" style="font-size: 16px;">close</span>
+              </button>
+            </template>
+          </div>
 
-          <div class="form-field">
-            <label>所属项目 (Project)</label>
-            <div class="input-wrapper">
-              <input v-model="uploadProject" type="text" placeholder="如 myproject" />
+          <template v-if="selectedFileKind">
+            <div class="form-field">
+              <label>所属项目 (Project)</label>
+              <div class="input-wrapper">
+                <input v-model="uploadProject" type="text" placeholder="如 myproject" />
+              </div>
             </div>
-          </div>
 
-          <div class="form-field">
-            <label>使用场景 (Usage)</label>
-            <div class="input-wrapper">
-              <select v-model="uploadUsage">
-                <option value="cover">cover (封面大图)</option>
-                <option value="scene">scene (场景/正片)</option>
-                <option value="avatar">avatar (头像/缩略图)</option>
-              </select>
+            <div v-if="selectedFileKind === 'image'" class="form-field">
+              <label>使用场景 (Usage)</label>
+              <div class="input-wrapper">
+                <select v-model="uploadUsage">
+                  <option value="cover">cover (封面大图)</option>
+                  <option value="scene">scene (场景/正片)</option>
+                  <option value="avatar">avatar (头像/缩略图)</option>
+                </select>
+              </div>
             </div>
-          </div>
 
-          <div class="form-field">
-            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-              <input type="checkbox" v-model="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
-              <span>是否启用大文件分片上传 (需要会员身份)</span>
-            </label>
-          </div>
-
-          <div class="form-field" style="margin-top: 8px;">
-            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-              <input type="checkbox" v-model="uploadAutoWebp" style="accent-color: hsl(var(--md-sys-color-primary));" />
-              <span>自动优化图片并转换为 WebP 格式（缩减文件体积，加速网页加载）</span>
-            </label>
-          </div>
-
-          <div class="form-field" style="margin-top: 16px;">
-            <label>选择媒体文件</label>
-            <div class="input-wrapper">
-              <input ref="fileInputRef" type="file" accept="image/*,video/*" />
+            <div v-if="selectedFileKind === 'image'" class="form-field">
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+                <input type="checkbox" v-model="uploadAutoWebp" style="accent-color: hsl(var(--md-sys-color-primary));" />
+                <span>自动优化并转换为 WebP 格式（缩减体积，加速加载）</span>
+              </label>
             </div>
-          </div>
+
+            <div v-if="selectedFileKind === 'video'" class="form-field">
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+                <input type="checkbox" v-model="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
+                <span>启用大文件分片上传 (需要会员身份)</span>
+              </label>
+            </div>
+          </template>
         </div>
         <div class="m3-dialog-footer">
           <button class="m3-btn m3-btn-secondary" @click="closeUploadDialog">取消</button>
@@ -460,7 +562,9 @@ onMounted(() => {
         <div v-if="activeAsset.mimeType.startsWith('image/') && activeAsset.status === 'active'" style="width: 100%; height: 180px; border-radius: 16px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,0.08);">
           <img :src="activeAsset.publicUrl" style="width:100%; height:100%; object-fit:contain;" />
         </div>
-        <video v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" :src="activeAsset.publicUrl" controls style="width:100%; height:180px; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); object-fit:contain;"></video>
+        <div v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
+          <video :src="activeAsset.publicUrl" controls style="width:100%; max-height:320px; object-fit:contain;"></video>
+        </div>
         
         <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px; margin-top: 12px;">
           <div>
@@ -513,6 +617,7 @@ onMounted(() => {
       </div>
       <div style="margin-top: 24px; display: flex; gap: 12px;" v-if="activeAsset">
         <button class="m3-btn m3-btn-primary m3-btn-sm" style="flex: 1;" @click="openMediaAsset(activeAsset.publicUrl)">在新标签页打开</button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1;" @click="downloadMediaAsset(activeAsset)">下载</button>
         <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1;" @click="copyText(activeAsset.publicUrl)">复制链接</button>
       </div>
     </div>

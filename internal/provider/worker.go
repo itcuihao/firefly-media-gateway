@@ -14,6 +14,23 @@ import (
 	"time"
 )
 
+// retryableHTTPDo executes an HTTP request with retry on transient errors (EOF, connection reset).
+func retryableHTTPDo(client *http.Client, req *http.Request, maxRetries int) (*http.Response, error) {
+	var lastErr error
+	for i := 0; i <= maxRetries; i++ {
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		// Only retry on transient network errors
+		if i < maxRetries {
+			time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+		}
+	}
+	return nil, lastErr
+}
+
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
 
 func escapeQuotes(s string) string {
@@ -79,7 +96,7 @@ func (p *WorkerProvider) Upload(ctx context.Context, in UploadInput) (UploadResu
 	req.Header.Set("Authorization", "Bearer "+p.authToken)
 
 	// 发送请求
-	resp, err := p.client.Do(req)
+	resp, err := retryableHTTPDo(p.client, req, 2)
 	if err != nil {
 		return UploadResult{}, fmt.Errorf("call Worker upload: %w", err)
 	}
@@ -126,7 +143,7 @@ func (p *WorkerProvider) GetAccess(ctx context.Context, providerFileID string, _
 	}
 	req.Header.Set("Authorization", "Bearer "+p.authToken)
 
-	resp, err := p.client.Do(req)
+	resp, err := retryableHTTPDo(p.client, req, 2)
 	if err != nil {
 		return AccessResult{}, fmt.Errorf("call Worker get: %w", err)
 	}

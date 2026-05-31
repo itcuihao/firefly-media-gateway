@@ -15,6 +15,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/qkzsky/go-qt-faststart v0.0.0-20181128120044-2fb99300755f // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
