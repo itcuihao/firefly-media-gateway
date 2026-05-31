@@ -111,8 +111,14 @@ case "$MODE" in
 
   dev | *)
     # 本地开发模式：加载 .env + 同时启动 Vite HMR 和 Go 后端
-    command -v node >/dev/null 2>&1 || err "未找到 node，请先安装 Node.js 18+"
+    command -v node >/dev/null 2>&1 || err "未找到 node，请先安装 Node.js 22+"
     command -v go   >/dev/null 2>&1 || err "未找到 go，请先安装 Go 1.21+"
+
+    node_version=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    if [ "${node_version:-0}" -lt 22 ]; then
+        warn "当前 Node.js 版本 $(node -v)，Vite 8 需要 Node >= 22.12.0"
+        warn "如遇构建失败，请升级 Node.js: nvm install 22"
+    fi
 
     load_env
     set_defaults

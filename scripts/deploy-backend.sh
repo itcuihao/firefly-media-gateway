@@ -131,6 +131,11 @@ elif [ "$DEPLOY_OPTION" = "2" ]; then
         log "检测到本地已有编译文件 ./server，正在复制..."
     else
         log "检测到 Go 环境，正在编译最新版本服务与内联前端资源..."
+        # Vite 8 requires Node >= 22.12.0
+        node_version=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+        if [ "${node_version:-0}" -lt 22 ]; then
+            err "Vite 8 需要 Node.js >= 22.12.0，当前版本 $(node -v)。请先升级 Node.js。"
+        fi
         # 编译前端和后端
         cd frontend && npm install --prefer-offline && npm run build && cd ..
         go build -o ./server ./cmd/server
