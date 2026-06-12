@@ -33,7 +33,12 @@ jobs:
     steps:
       - name: Extract tag name
         id: tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+        run: |
+          REF_NAME="${GITHUB_REF#refs/tags/}"
+          REF_NAME="${REF_NAME#refs/heads/}"
+          # Replace slashes with dashes to ensure a valid Docker tag name
+          TAG_NAME=$(echo "$REF_NAME" | sed 's/\//-/g')
+          echo "TAG=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
@@ -44,7 +49,10 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script: |
             cd /opt/firefly-media-gateway
-            git pull
+            git fetch --all --tags -f
+            git checkout ${{ steps.tag.outputs.TAG }}
+            # If it's a branch, pull the latest changes; if it's a tag, git pull might do nothing but checkout is sufficient.
+            git pull || true
             docker build -t firefly-media-gateway:${{ steps.tag.outputs.TAG }} -t firefly-media-gateway:latest .
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
