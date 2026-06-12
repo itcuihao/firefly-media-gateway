@@ -5,6 +5,8 @@ import "context"
 type Repository interface {
 	Create(ctx context.Context, input CreateAssetInput) (Asset, error)
 	GetByID(ctx context.Context, id string) (Asset, error)
+	GetActiveBySHA256(ctx context.Context, sha256 string) (Asset, error)
+	CountActiveBySHA256(ctx context.Context, sha256 string) (int, error)
 	MarkDeleted(ctx context.Context, id string) (Asset, error)
 	List(ctx context.Context, limit, offset int) ([]Asset, error)
 

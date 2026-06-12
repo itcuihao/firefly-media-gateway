@@ -2,6 +2,8 @@ package media
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"testing"
 
 	"firefly-media-gateway/internal/provider"
@@ -95,12 +97,28 @@ func TestDeleteChunkedDeletesEveryChunk(t *testing.T) {
 }
 
 type fakeRepository struct {
-	asset  Asset
-	chunks []Chunk
+	asset             Asset
+	chunks            []Chunk
+	activeBySHA256    map[string]Asset
+	activeBySHA256Err error
+	countBySHA256     map[string]int
 }
 
-func (r *fakeRepository) Create(context.Context, CreateAssetInput) (Asset, error) {
-	return Asset{}, nil
+func (r *fakeRepository) Create(_ context.Context, input CreateAssetInput) (Asset, error) {
+	return Asset{
+		ID:                   input.ID,
+		Provider:             input.Provider,
+		ProviderFileID:       input.ProviderFileID,
+		ProviderBucketOrChat: input.ProviderBucketOrChat,
+		PublicURL:            input.PublicURL,
+		MIMEType:             input.MIMEType,
+		SizeBytes:            input.SizeBytes,
+		SHA256:               input.SHA256,
+		Project:              input.Project,
+		Usage:                input.Usage,
+		Status:               StatusActive,
+		IsChunked:            input.IsChunked,
+	}, nil
 }
 
 func (r *fakeRepository) GetByID(_ context.Context, id string) (Asset, error) {
@@ -136,6 +154,23 @@ func (r *fakeRepository) DeleteChunks(_ context.Context, assetID string) error {
 	return nil
 }
 
+func (r *fakeRepository) GetActiveBySHA256(_ context.Context, sha string) (Asset, error) {
+	if r.activeBySHA256Err != nil {
+		return Asset{}, r.activeBySHA256Err
+	}
+	if a, ok := r.activeBySHA256[sha]; ok {
+		return a, nil
+	}
+	return Asset{}, ErrNotFound
+}
+
+func (r *fakeRepository) CountActiveBySHA256(_ context.Context, sha string) (int, error) {
+	if c, ok := r.countBySHA256[sha]; ok {
+		return c, nil
+	}
+	return 0, nil
+}
+
 type fakeProvider struct {
 	name       string
 	deletedIDs []string
@@ -155,5 +190,95 @@ func (p *fakeProvider) Delete(_ context.Context, providerFileID string, _ *strin
 }
 
 func (p *fakeProvider) GetAccess(context.Context, string, *string) (provider.AccessResult, error) {
+	return provider.AccessResult{}, nil
+}
+
+func TestUploadDeduplication(t *testing.T) {
+	location := "bucket-a"
+	existingAsset := Asset{
+		ID:                   "asset-old",
+		Provider:             "fake",
+		ProviderFileID:       "file-remote-123",
+		ProviderBucketOrChat: &location,
+		Status:               StatusActive,
+		IsChunked:            false,
+	}
+
+	repo := &fakeRepository{
+		activeBySHA256: map[string]Asset{
+			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": existingAsset, // SHA256 of empty reader
+		},
+	}
+
+	p := &errorProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	var r emptyReader
+	result, err := svc.Upload(context.Background(), UploadRequest{
+		Project:             "proj",
+		Usage:               "cover",
+		FileName:            "test.jpg",
+		DeclaredContentType: "image/jpeg",
+		Reader:              r,
+	})
+	if err != nil {
+		t.Fatalf("unexpected upload error: %v", err)
+	}
+
+	if result.ID == existingAsset.ID {
+		t.Fatalf("expected new asset ID, got duplicate ID %s", result.ID)
+	}
+	if result.ProviderFileID != existingAsset.ProviderFileID {
+		t.Fatalf("expected reused ProviderFileID %s, got %s", existingAsset.ProviderFileID, result.ProviderFileID)
+	}
+}
+
+func TestDeleteDeduplication(t *testing.T) {
+	location := "bucket-a"
+	sha := "hash123"
+	repo := &fakeRepository{
+		asset: Asset{
+			ID:                   "asset-1",
+			Provider:             "fake",
+			ProviderFileID:       "file-1",
+			ProviderBucketOrChat: &location,
+			Status:               StatusActive,
+			SHA256:               &sha,
+			IsChunked:            false,
+		},
+		countBySHA256: map[string]int{
+			"hash123": 2, // 2 active records share this hash
+		},
+	}
+	p := &fakeProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	asset, err := svc.Delete(context.Background(), "asset-1", nil)
+	if err != nil {
+		t.Fatalf("delete asset: %v", err)
+	}
+	if asset.Status != StatusDeleted {
+		t.Fatalf("expected deleted status, got %q", asset.Status)
+	}
+
+	if len(p.deletedIDs) != 0 {
+		t.Fatalf("expected no physical deletes, but got %d deletes: %#v", len(p.deletedIDs), p.deletedIDs)
+	}
+}
+
+type emptyReader struct{}
+func (emptyReader) Read(p []byte) (n int, err error) {
+	return 0, io.EOF
+}
+
+type errorProvider struct {
+	name string
+}
+func (p *errorProvider) Name() string { return p.name }
+func (p *errorProvider) Upload(context.Context, provider.UploadInput) (provider.UploadResult, error) {
+	return provider.UploadResult{}, fmt.Errorf("should not be called")
+}
+func (p *errorProvider) Delete(context.Context, string, *string) error { return nil }
+func (p *errorProvider) GetAccess(context.Context, string, *string) (provider.AccessResult, error) {
 	return provider.AccessResult{}, nil
 }

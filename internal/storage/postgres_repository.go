@@ -169,6 +169,38 @@ func (r *PostgresRepository) DeleteChunks(ctx context.Context, assetID string) e
 	return err
 }
 
+func (r *PostgresRepository) GetActiveBySHA256(ctx context.Context, sha256 string) (media.Asset, error) {
+	const q = `
+SELECT
+	id, provider, provider_file_id, provider_bucket_or_chat,
+	public_url, mime_type, size_bytes, sha256,
+	project, usage, status, created_at, updated_at, deleted_at, is_chunked
+FROM media_assets
+WHERE sha256 = $1 AND status = 'active'
+ORDER BY created_at DESC
+LIMIT 1
+`
+	row := r.db.QueryRowContext(ctx, q, sha256)
+	asset, err := scanAsset(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return media.Asset{}, media.ErrNotFound
+		}
+		return media.Asset{}, fmt.Errorf("query media asset by sha256: %w", err)
+	}
+	return asset, nil
+}
+
+func (r *PostgresRepository) CountActiveBySHA256(ctx context.Context, sha256 string) (int, error) {
+	const q = `SELECT COUNT(*) FROM media_assets WHERE sha256 = $1 AND status = 'active'`
+	var count int
+	err := r.db.QueryRowContext(ctx, q, sha256).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active assets by sha256: %w", err)
+	}
+	return count, nil
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

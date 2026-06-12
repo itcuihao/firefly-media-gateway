@@ -94,6 +94,52 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytesChunk, ErrFileTooLarge)
 	}
 
+	// Check if file already exists in active assets (Soft Deduplication - Scheme B)
+	if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
+		assetID := newUUID()
+		ext := extByMIME(mimeType)
+		publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
+
+		// Create metadata entry pointing to the same provider resources
+		asset, err := s.repo.Create(ctx, CreateAssetInput{
+			ID:                   assetID,
+			Provider:             existingAsset.Provider,
+			ProviderFileID:       existingAsset.ProviderFileID,
+			ProviderBucketOrChat: existingAsset.ProviderBucketOrChat,
+			PublicURL:            publicURL,
+			MIMEType:             mimeType,
+			SizeBytes:            sizeBytes,
+			SHA256:               &shaHex,
+			Project:              strings.TrimSpace(req.Project),
+			Usage:                req.Usage,
+			IsChunked:            existingAsset.IsChunked,
+		})
+		if err != nil {
+			return Asset{}, fmt.Errorf("duplicate asset metadata creation failed: %w", err)
+		}
+
+		// If chunked, replicate the chunk records
+		if existingAsset.IsChunked {
+			chunks, err := s.repo.GetChunks(ctx, existingAsset.ID)
+			if err != nil {
+				return Asset{}, fmt.Errorf("duplicate asset get chunks failed: %w", err)
+			}
+			newChunks := make([]Chunk, len(chunks))
+			for i, c := range chunks {
+				newChunks[i] = Chunk{
+					AssetID:     assetID,
+					ChunkIndex:  c.ChunkIndex,
+					ChunkFileID: c.ChunkFileID,
+				}
+			}
+			if err := s.repo.SaveChunks(ctx, assetID, newChunks); err != nil {
+				return Asset{}, fmt.Errorf("duplicate asset save chunks failed: %w", err)
+			}
+		}
+
+		return asset, nil
+	}
+
 	// Apply MP4 faststart (move moov atom to file head) for streaming playback
 	if mediaKind == "video" && mimeType == "video/mp4" {
 		if fsFile, err := fastStartMP4(tmpFile); err != nil {
@@ -361,21 +407,36 @@ func (s *Service) Delete(ctx context.Context, id string, overrideProvider provid
 		}
 	}
 
-	if asset.IsChunked {
-		chunks, err := s.repo.GetChunks(ctx, id)
-		if err != nil {
-			return Asset{}, fmt.Errorf("get chunks for delete: %w", err)
+	// Check if this physical storage file is shared by other active assets (reference count check)
+	skipPhysicalDelete := false
+	if asset.SHA256 != nil {
+		count, err := s.repo.CountActiveBySHA256(ctx, *asset.SHA256)
+		if err == nil && count > 1 {
+			skipPhysicalDelete = true
 		}
-		for _, c := range chunks {
-			if err := p.Delete(ctx, c.ChunkFileID, asset.ProviderBucketOrChat); err != nil {
-				return Asset{}, fmt.Errorf("delete chunk from provider %q failed: %w", p.Name(), err)
+	}
+
+	if asset.IsChunked {
+		if !skipPhysicalDelete {
+			chunks, err := s.repo.GetChunks(ctx, id)
+			if err != nil {
+				return Asset{}, fmt.Errorf("get chunks for delete: %w", err)
+			}
+			for _, c := range chunks {
+				if err := p.Delete(ctx, c.ChunkFileID, asset.ProviderBucketOrChat); err != nil {
+					return Asset{}, fmt.Errorf("delete chunk from provider %q failed: %w", p.Name(), err)
+				}
 			}
 		}
 		if err := s.repo.DeleteChunks(ctx, id); err != nil {
 			return Asset{}, fmt.Errorf("delete chunk records: %w", err)
 		}
-	} else if err := p.Delete(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat); err != nil {
-		return Asset{}, fmt.Errorf("delete from provider %q failed: %w", p.Name(), err)
+	} else {
+		if !skipPhysicalDelete {
+			if err := p.Delete(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat); err != nil {
+				return Asset{}, fmt.Errorf("delete from provider %q failed: %w", p.Name(), err)
+			}
+		}
 	}
 
 	return s.repo.MarkDeleted(ctx, id)
