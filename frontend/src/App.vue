@@ -188,7 +188,7 @@ onUnmounted(() => {
     
     <!-- Navigation Drawer -->
     <nav :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
-      <div class="nav-brand">
+      <div class="nav-brand" @click="switchTab('gallery')" style="cursor: pointer;">
         <div class="logo-wrapper">
           <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" />
           <span class="logo-badge">嘿嘿</span>
@@ -196,13 +196,6 @@ onUnmounted(() => {
         <h1>Firefly Gateway</h1>
       </div>
       <ul class="nav-menu">
-        <li>
-          <button :class="['nav-item', { active: activeTab === 'gallery' }]" @click="switchTab('gallery')">
-            <span class="material-symbols-rounded">photo_library</span>
-            <span>展示广场</span>
-          </button>
-        </li>
-        
         <template v-if="isLoggedIn">
           <li>
             <button :class="['nav-item', { active: activeTab === 'dashboard' }]" @click="switchTab('dashboard')">
@@ -232,14 +225,6 @@ onUnmounted(() => {
             <button class="nav-item logout-btn" @click="handleLogout">
               <span class="material-symbols-rounded" style="color: var(--md-sys-color-error);">logout</span>
               <span>退出登录</span>
-            </button>
-          </li>
-        </template>
-        <template v-else>
-          <li>
-            <button :class="['nav-item', { active: activeTab === 'login' }]" @click="switchTab('login')">
-              <span class="material-symbols-rounded">lock</span>
-              <span>登录后台</span>
             </button>
           </li>
         </template>
