@@ -1,5 +1,14 @@
 // API client and configuration utilities for Firefly Media Gateway
 
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+    this.name = 'ApiError'
+  }
+}
+
 export interface MediaAsset {
   mediaId: string
   provider: string
@@ -88,7 +97,7 @@ export async function apiRequest<T = any>(
         errMsg = errData.error
       }
     } catch (_) {}
-    throw new Error(errMsg)
+    throw new ApiError(errMsg, resp.status)
   }
 
   // Handle empty responses

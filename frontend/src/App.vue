@@ -3,13 +3,15 @@ import { ref, provide, onMounted, onUnmounted } from 'vue'
 import { LOGO_BASE64 } from './logo'
 import { getApiBaseUrl, setApiBaseUrl, getApiToken, setApiToken, apiRequest } from './api'
 import type { HealthInfo } from './api'
+import Gallery from './components/Gallery.vue'
+import Login from './components/Login.vue'
 import Dashboard from './components/Dashboard.vue'
 import MediaExplorer from './components/MediaExplorer.vue'
 import BotVerifier from './components/BotVerifier.vue'
 import ApiSandbox from './components/ApiSandbox.vue'
 
 // Active Panel Tab state
-const activeTab = ref('dashboard')
+const activeTab = ref('gallery')
 const drawerOpen = ref(false)
 
 // Config Settings dropdown states
@@ -71,6 +73,42 @@ function saveGlobalConfig() {
   }, 500)
 }
 
+const isLoggedIn = ref(false)
+
+async function checkAuth() {
+  const token = getApiToken()
+  if (!token) {
+    isLoggedIn.value = false
+    return
+  }
+  try {
+    // Check if token is valid
+    await apiRequest('/api/v1/media?limit=1')
+    isLoggedIn.value = true
+  } catch (err: any) {
+    isLoggedIn.value = false
+    if (err.status === 401) {
+      setApiToken('') // Clear invalid token
+    }
+  }
+}
+
+function handleLoginSuccess() {
+  isLoggedIn.value = true
+  activeTab.value = 'dashboard'
+}
+
+function handleLogout() {
+  setApiToken('')
+  isLoggedIn.value = false
+  authToken.value = ''
+  showToast('已退出登录！')
+  activeTab.value = 'gallery'
+  setTimeout(() => {
+    window.location.reload()
+  }, 500)
+}
+
 // Global click handler to close dropdown
 function handleWindowClick(e: MouseEvent) {
   const target = e.target as HTMLElement
@@ -125,6 +163,7 @@ onMounted(() => {
   window.addEventListener('click', handleWindowClick)
   window.addEventListener('worker-status-changed', updateActiveWorkerStatus)
   updateActiveWorkerStatus()
+  checkAuth()
 })
 
 onUnmounted(() => {
@@ -158,29 +197,52 @@ onUnmounted(() => {
       </div>
       <ul class="nav-menu">
         <li>
-          <button :class="['nav-item', { active: activeTab === 'dashboard' }]" @click="switchTab('dashboard')">
-            <span class="material-symbols-rounded">dashboard</span>
-            <span>仪表盘总览</span>
+          <button :class="['nav-item', { active: activeTab === 'gallery' }]" @click="switchTab('gallery')">
+            <span class="material-symbols-rounded">photo_library</span>
+            <span>展示广场</span>
           </button>
         </li>
-        <li>
-          <button :class="['nav-item', { active: activeTab === 'explorer' }]" @click="switchTab('explorer')">
-            <span class="material-symbols-rounded">folder_open</span>
-            <span>媒体库管理器</span>
-          </button>
-        </li>
-        <li>
-          <button :class="['nav-item', { active: activeTab === 'verifier' }]" @click="switchTab('verifier')">
-            <span class="material-symbols-rounded">vpn_key</span>
-            <span>通道与节点管理</span>
-          </button>
-        </li>
-        <li>
-          <button :class="['nav-item', { active: activeTab === 'sandbox' }]" @click="switchTab('sandbox')">
-            <span class="material-symbols-rounded">science</span>
-            <span>API 联调沙盒</span>
-          </button>
-        </li>
+        
+        <template v-if="isLoggedIn">
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'dashboard' }]" @click="switchTab('dashboard')">
+              <span class="material-symbols-rounded">dashboard</span>
+              <span>仪表盘总览</span>
+            </button>
+          </li>
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'explorer' }]" @click="switchTab('explorer')">
+              <span class="material-symbols-rounded">folder_open</span>
+              <span>媒体库管理器</span>
+            </button>
+          </li>
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'verifier' }]" @click="switchTab('verifier')">
+              <span class="material-symbols-rounded">vpn_key</span>
+              <span>通道与节点管理</span>
+            </button>
+          </li>
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'sandbox' }]" @click="switchTab('sandbox')">
+              <span class="material-symbols-rounded">science</span>
+              <span>API 联调沙盒</span>
+            </button>
+          </li>
+          <li style="margin-top: auto; padding-top: 24px;">
+            <button class="nav-item logout-btn" @click="handleLogout">
+              <span class="material-symbols-rounded" style="color: var(--md-sys-color-error);">logout</span>
+              <span>退出登录</span>
+            </button>
+          </li>
+        </template>
+        <template v-else>
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'login' }]" @click="switchTab('login')">
+              <span class="material-symbols-rounded">lock</span>
+              <span>登录后台</span>
+            </button>
+          </li>
+        </template>
       </ul>
     </nav>
 
@@ -194,16 +256,19 @@ onUnmounted(() => {
             <span class="material-symbols-rounded" style="font-size: 28px;">menu</span>
           </button>
           <div class="page-title" id="pageTitle">
-            <span v-if="activeTab === 'dashboard'">仪表盘总览</span>
+            <span v-if="activeTab === 'gallery'">展示广场</span>
+            <span v-else-if="activeTab === 'dashboard'">仪表盘总览</span>
             <span v-else-if="activeTab === 'explorer'">媒体库管理器</span>
             <span v-else-if="activeTab === 'verifier'">通道与节点管理</span>
             <span v-else-if="activeTab === 'sandbox'">API 联调沙盒</span>
+            <span v-else-if="activeTab === 'login'">管理员登录</span>
           </div>
         </div>
 
         <div class="global-actions">
           <!-- Storage Mode Badge -->
           <div 
+            v-if="isLoggedIn"
             :class="['mode-badge-btn', isWorkerMode ? 'worker-active' : 'direct-active']" 
             :title="isWorkerMode ? '当前为 CF Worker 代理模式' : '当前直连后端 Telegram 存储'"
           >
@@ -213,9 +278,14 @@ onUnmounted(() => {
             <span>{{ isWorkerMode ? activeWorkerName : '直连 TG 模式' }}</span>
           </div>
 
-          <button :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown">
+          <button v-if="isLoggedIn" :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown">
             <span class="material-symbols-rounded" style="font-size: 18px;">settings</span>
             <span>网关连接配置</span>
+          </button>
+
+          <button v-if="!isLoggedIn && activeTab !== 'login'" class="m3-btn m3-btn-primary m3-btn-sm" @click="switchTab('login')">
+            <span class="material-symbols-rounded" style="font-size: 16px;">login</span>
+            <span>登录后台</span>
           </button>
           
           <!-- Quick Config dropdown panel -->
@@ -245,10 +315,14 @@ onUnmounted(() => {
 
       <!-- App Body Panel Switcher -->
       <main class="content-body">
-        <Dashboard v-if="activeTab === 'dashboard'" @switch-tab="switchTab" />
-        <MediaExplorer v-else-if="activeTab === 'explorer'" />
-        <BotVerifier v-else-if="activeTab === 'verifier'" />
-        <ApiSandbox v-else-if="activeTab === 'sandbox'" />
+        <Gallery v-if="activeTab === 'gallery'" />
+        <Login v-else-if="activeTab === 'login'" @login-success="handleLoginSuccess" />
+        <template v-else-if="isLoggedIn">
+          <Dashboard v-if="activeTab === 'dashboard'" @switch-tab="switchTab" />
+          <MediaExplorer v-else-if="activeTab === 'explorer'" />
+          <BotVerifier v-else-if="activeTab === 'verifier'" />
+          <ApiSandbox v-else-if="activeTab === 'sandbox'" />
+        </template>
       </main>
     </div>
   </div>

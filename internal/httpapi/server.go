@@ -63,7 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/admin/", http.StripPrefix("/admin", s.frontendHandler()))
 
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
-	mux.HandleFunc("GET /api/v1/media", s.withAuth(s.handleListMedia))
+	mux.HandleFunc("GET /api/v1/media", s.handleListMedia)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
 	mux.HandleFunc("GET /api/v1/telegram/chat-ids", s.withAuth(s.handleGetTelegramChatIDs))
@@ -562,6 +562,10 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 }
 
 func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	expected := "Bearer " + s.authToken
+	hasAuth := auth == expected
+
 	limit := 20
 	offset := 0
 
@@ -582,9 +586,14 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signedAssets := make([]media.Asset, len(assets))
-	for i, asset := range assets {
-		signedAssets[i] = s.signAssetURL(asset)
+	var signedAssets []media.Asset
+	for _, asset := range assets {
+		isPublic := s.isAssetPublic(asset)
+		if !isPublic && !hasAuth {
+			// Skip private assets for unauthenticated visitors
+			continue
+		}
+		signedAssets = append(signedAssets, s.signAssetURL(asset))
 	}
 
 	writeJSON(w, http.StatusOK, signedAssets)
