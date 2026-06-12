@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"firefly-media-gateway/internal/media"
@@ -191,6 +192,9 @@ func (r *SQLiteRepository) GetChunks(ctx context.Context, assetID string) ([]med
 		if err := rows.Scan(&c.AssetID, &c.ChunkIndex, &c.ChunkFileID); err != nil {
 			return nil, fmt.Errorf("scan chunk: %w", err)
 		}
+		if len(c.AssetID) == 36 {
+			c.AssetID = strings.ReplaceAll(c.AssetID, "-", "")
+		}
 		chunks = append(chunks, c)
 	}
 	return chunks, rows.Err()
@@ -229,6 +233,10 @@ func scanSQLiteAsset(s scanner) (media.Asset, error) {
 	)
 	if err != nil {
 		return media.Asset{}, err
+	}
+
+	if len(asset.ID) == 36 {
+		asset.ID = strings.ReplaceAll(asset.ID, "-", "")
 	}
 
 	if providerBucket.Valid {

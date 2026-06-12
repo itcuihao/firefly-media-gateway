@@ -1581,7 +1581,7 @@ const debugHTML = `<!doctype html>
       </div>
       <div class="m3-dialog-body">
         <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">
-          文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 120MB (mp4/webm/mov)。
+          文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 2GB (mp4/webm/mov)。
         </p>
 
         <div class="form-field">

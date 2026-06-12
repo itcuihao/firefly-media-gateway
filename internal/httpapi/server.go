@@ -20,7 +20,7 @@ import (
 	"firefly-media-gateway/internal/provider"
 )
 
-const maxRequestBodyBytes int64 = 201 * 1024 * 1024 // 200MB + 1MB buffer
+const maxRequestBodyBytes int64 = 2005 * 1024 * 1024 // 2GB + 5MB buffer
 
 type Server struct {
 	svc              *media.Service
@@ -262,21 +262,68 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 }
 
 func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
-	if strings.TrimSpace(r.Header.Get("Range")) != "" {
-		s.writeError(w, r, http.StatusRequestedRangeNotSatisfiable, "range is not supported for chunked media yet", nil)
-		return
+	chunkSize := streamInfo.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 15 * 1024 * 1024 // Fallback default chunk size
+	}
+
+	var start int64 = 0
+	var end int64 = streamInfo.TotalBytes - 1
+	isRange := false
+
+	if rangeHeader := strings.TrimSpace(r.Header.Get("Range")); rangeHeader != "" {
+		ranges, err := parseRangeHeader(rangeHeader, streamInfo.TotalBytes)
+		if err != nil {
+			s.writeError(w, r, http.StatusRequestedRangeNotSatisfiable, "invalid range header", err)
+			return
+		}
+		if len(ranges) > 0 {
+			start = ranges[0].start
+			end = ranges[0].end
+			isRange = true
+		}
 	}
 
 	if streamInfo.MIMEType != "" {
 		w.Header().Set("Content-Type", streamInfo.MIMEType)
 	}
-	if streamInfo.TotalBytes > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
-	}
-	w.Header().Set("Cache-Control", "private, max-age=0")
-	w.WriteHeader(http.StatusOK)
 
-	for _, chunkURL := range streamInfo.ChunkURLs {
+	if isRange {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, streamInfo.TotalBytes))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		if streamInfo.TotalBytes > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.WriteHeader(http.StatusOK)
+	}
+
+	for i, chunkURL := range streamInfo.ChunkURLs {
+		chunkStart := int64(i) * chunkSize
+		chunkEnd := chunkStart + chunkSize - 1
+		if chunkEnd >= streamInfo.TotalBytes {
+			chunkEnd = streamInfo.TotalBytes - 1
+		}
+		chunkSizeBytes := chunkEnd - chunkStart + 1
+
+		// Check if this chunk overlaps with the requested range
+		if start > chunkEnd || end < chunkStart {
+			continue
+		}
+
+		// Calculate relative start/end within this chunk
+		relativeStart := start - chunkStart
+		if relativeStart < 0 {
+			relativeStart = 0
+		}
+		relativeEnd := end - chunkStart
+		if relativeEnd >= chunkSizeBytes {
+			relativeEnd = chunkSizeBytes - 1
+		}
+
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, chunkURL, nil)
 		if err != nil {
 			s.logger.Printf("[WARN]  build chunk request failed: %v", err)
@@ -285,23 +332,98 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		for k, v := range streamInfo.Headers {
 			req.Header.Set(k, v)
 		}
+		// Request the specific range from the storage provider
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", relativeStart, relativeEnd))
+
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			s.logger.Printf("[WARN]  fetch chunk failed: %v", err)
+			s.logger.Printf("[WARN]  fetch chunk range failed: %v", err)
 			return
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
 			s.logger.Printf("[WARN]  fetch chunk returned status=%d", resp.StatusCode)
 			return
 		}
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			resp.Body.Close()
-			s.logger.Printf("[WARN]  write chunk failed: %v", err)
+
+		_, copyErr := io.Copy(w, resp.Body)
+		resp.Body.Close()
+
+		if copyErr != nil {
+			s.logger.Printf("[WARN]  write chunk failed: %v", copyErr)
 			return
 		}
-		resp.Body.Close()
 	}
+}
+
+type byteRange struct {
+	start int64
+	end   int64
+}
+
+func parseRangeHeader(header string, size int64) ([]byteRange, error) {
+	if header == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(header, "bytes=") {
+		return nil, fmt.Errorf("invalid range header prefix")
+	}
+	rangesStr := strings.TrimPrefix(header, "bytes=")
+	var ranges []byteRange
+	for _, rStr := range strings.Split(rangesStr, ",") {
+		rStr = strings.TrimSpace(rStr)
+		if rStr == "" {
+			continue
+		}
+		parts := strings.Split(rStr, "-")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid range format")
+		}
+		startStr := strings.TrimSpace(parts[0])
+		endStr := strings.TrimSpace(parts[1])
+		var r byteRange
+		if startStr == "" {
+			if endStr == "" {
+				return nil, fmt.Errorf("invalid range values")
+			}
+			suffixLen, err := strconv.ParseInt(endStr, 10, 64)
+			if err != nil || suffixLen <= 0 {
+				return nil, fmt.Errorf("invalid suffix length")
+			}
+			if suffixLen > size {
+				suffixLen = size
+			}
+			r.start = size - suffixLen
+			r.end = size - 1
+		} else {
+			start, err := strconv.ParseInt(startStr, 10, 64)
+			if err != nil || start < 0 {
+				return nil, fmt.Errorf("invalid start byte")
+			}
+			r.start = start
+			if endStr == "" {
+				r.end = size - 1
+			} else {
+				end, err := strconv.ParseInt(endStr, 10, 64)
+				if err != nil || end < start {
+					return nil, fmt.Errorf("invalid end byte")
+				}
+				r.end = end
+				if r.end >= size {
+					r.end = size - 1
+				}
+			}
+		}
+		if r.start >= size {
+			continue
+		}
+		ranges = append(ranges, r)
+	}
+	if len(ranges) == 0 {
+		return nil, fmt.Errorf("no valid ranges")
+	}
+	return ranges, nil
 }
 
 func copyMediaHeaders(dst, src http.Header) {

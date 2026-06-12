@@ -38,8 +38,8 @@ const dragOver = ref(false)
 
 const sizeLimitHint = computed(() => {
   if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp)'
-  if (selectedFileKind.value === 'video') return '视频最大 120MB (mp4/webm/mov)'
-  return '文件最大支持限制：图片 10MB，视频 120MB'
+  if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov)'
+  return '文件最大支持限制：图片 10MB，视频 2GB'
 })
 
 function onFileSelected() {

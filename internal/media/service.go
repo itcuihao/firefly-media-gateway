@@ -1,7 +1,6 @@
 package media
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,10 +18,10 @@ import (
 )
 
 const (
-	maxImageSizeBytes      int64 = 10 * 1024 * 1024  // 10MB for images
-	maxVideoSizeBytes      int64 = 50 * 1024 * 1024  // 50MB Telegram limit
-	maxVideoSizeBytesChunk int64 = 200 * 1024 * 1024 // 200MB for members with chunking
-	chunkSize              int64 = 50 * 1024 * 1024  // 50MB per chunk
+	maxImageSizeBytes      int64 = 10 * 1024 * 1024   // 10MB for images
+	maxVideoSizeBytes      int64 = 50 * 1024 * 1024   // 50MB Telegram limit
+	maxVideoSizeBytesChunk int64 = 2000 * 1024 * 1024 // 2GB limit for chunking
+	chunkSize              int64 = 15 * 1024 * 1024   // 15MB per chunk (under Telegram download limit of 20MB)
 )
 
 type UploadRequest struct {
@@ -157,25 +156,17 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 
 // uploadChunked handles chunked upload for large videos
 func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider, tmpFile *os.File, req UploadRequest, mimeType string, sizeBytes int64, shaHex string) (Asset, error) {
-	data, err := os.ReadFile(tmpFile.Name())
-	if err != nil {
-		return Asset{}, fmt.Errorf("read temp file: %w", err)
-	}
-
 	chunkCount := int((sizeBytes + chunkSize - 1) / chunkSize)
 	chunks := make([]Chunk, 0, chunkCount)
 	var providerBucketOrChat *string
 
 	for i := 0; i < chunkCount; i++ {
 		start := int64(i) * chunkSize
-		end := start + chunkSize
-		if end > sizeBytes {
-			end = sizeBytes
+		if _, err := tmpFile.Seek(start, io.SeekStart); err != nil {
+			return Asset{}, fmt.Errorf("seek temp file to chunk %d failed: %w", i, err)
 		}
 
-		chunkData := data[start:end]
-		chunkReader := bytes.NewReader(chunkData)
-
+		chunkReader := io.LimitReader(tmpFile, chunkSize)
 		chunkName := fmt.Sprintf("%s.chunk%d", req.FileName, i)
 		upResult, err := p.Upload(ctx, provider.UploadInput{
 			FileName: chunkName,
@@ -272,6 +263,7 @@ type StreamInfo struct {
 	MIMEType   string            `json:"mimeType"`
 	ChunkCount int               `json:"chunkCount,omitempty"`
 	ChunkURLs  []string          `json:"chunkUrls,omitempty"`
+	ChunkSize  int64             `json:"chunkSize,omitempty"`
 }
 
 // StreamAsset returns stream URLs for an asset
@@ -347,6 +339,7 @@ func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider p
 		ChunkCount: len(chunkURLs),
 		ChunkURLs:  chunkURLs,
 		Headers:    headers,
+		ChunkSize:  deduceChunkSize(asset.SizeBytes, len(chunkURLs)),
 	}, nil
 }
 
@@ -399,7 +392,7 @@ func persistUpload(src io.Reader) (*os.File, int64, string, []byte, error) {
 	sniff := make([]byte, 0, 512)
 	var total int64
 
-	const absoluteMax = 200 * 1024 * 1024
+	const absoluteMax = 2000 * 1024 * 1024
 
 	for {
 		n, readErr := src.Read(buf)
@@ -549,4 +542,24 @@ func fastStartMP4(tmpFile *os.File) (*os.File, error) {
 		return nil, fmt.Errorf("seek output: %w", err)
 	}
 	return out, nil
+}
+
+func deduceChunkSize(totalSize int64, chunkCount int) int64 {
+	if chunkCount <= 1 {
+		return totalSize
+	}
+
+	standards := []int64{
+		15 * 1024 * 1024, // 15MB
+		50 * 1024 * 1024, // 50MB
+		10 * 1024 * 1024, // 10MB
+	}
+	for _, s := range standards {
+		calculatedChunks := int((totalSize + s - 1) / s)
+		if calculatedChunks == chunkCount {
+			return s
+		}
+	}
+
+	return (totalSize + int64(chunkCount) - 1) / int64(chunkCount)
 }
