@@ -191,9 +191,9 @@ onUnmounted(() => {
       <div class="nav-brand" @click="switchTab('gallery')" style="cursor: pointer;">
         <div class="logo-wrapper">
           <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" />
-          <span class="logo-badge">嘿嘿</span>
+          <span class="logo-badge">之巢</span>
         </div>
-        <h1>Firefly Gateway</h1>
+        <h1>Firefly Nest</h1>
       </div>
       <ul class="nav-menu">
         <template v-if="isLoggedIn">
@@ -245,7 +245,7 @@ onUnmounted(() => {
             <div class="logo-wrapper" style="width: 32px; height: 32px; position: relative;">
               <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" style="width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.4));" />
             </div>
-            <h1 style="font-size: 18px; font-weight: 700; background: linear-gradient(135deg, hsl(var(--md-sys-color-primary)), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Firefly Gateway</h1>
+            <h1 style="font-size: 18px; font-weight: 700; background: linear-gradient(135deg, hsl(var(--md-sys-color-primary)), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Firefly Nest</h1>
           </div>
 
           <div v-else class="page-title" id="pageTitle">
