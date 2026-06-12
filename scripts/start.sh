@@ -97,9 +97,10 @@ case "$MODE" in
     ;;
 
   run)
-    # 生产构建后运行，需要 .env
-    build_frontend
-    build_server
+    # 生产构建后直接运行，需要 .env
+    if [ ! -f "$BINARY" ]; then
+        err "未找到编译好的服务端二进制文件 ($BINARY)，请先运行 ./scripts/start.sh build 进行生产构建"
+    fi
     load_env
     set_defaults
     validate_env
