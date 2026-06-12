@@ -187,7 +187,7 @@ onUnmounted(() => {
   <div class="app-layout">
     
     <!-- Navigation Drawer -->
-    <nav :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
+    <nav v-if="isLoggedIn" :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
       <div class="nav-brand" @click="switchTab('gallery')" style="cursor: pointer;">
         <div class="logo-wrapper">
           <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" />
@@ -232,21 +232,27 @@ onUnmounted(() => {
     </nav>
 
     <!-- Content Workspace -->
-    <div class="main-wrapper">
+    <div :class="['main-wrapper', { 'full-width': !isLoggedIn }]">
       
       <!-- Top App Bar Header -->
       <header class="top-app-bar">
-        <div style="display: flex; align-items: center;">
-          <button class="menu-toggle" @click="toggleDrawer">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <button v-if="isLoggedIn" class="menu-toggle" @click="toggleDrawer">
             <span class="material-symbols-rounded" style="font-size: 28px;">menu</span>
           </button>
-          <div class="page-title" id="pageTitle">
-            <span v-if="activeTab === 'gallery'">展示广场</span>
-            <span v-else-if="activeTab === 'dashboard'">仪表盘总览</span>
+          
+          <div v-if="!isLoggedIn" class="guest-brand" @click="switchTab('gallery')" style="cursor: pointer; display: flex; align-items: center; gap: 12px;">
+            <div class="logo-wrapper" style="width: 32px; height: 32px; position: relative;">
+              <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" style="width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.4));" />
+            </div>
+            <h1 style="font-size: 18px; font-weight: 700; background: linear-gradient(135deg, hsl(var(--md-sys-color-primary)), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Firefly Gateway</h1>
+          </div>
+
+          <div v-else class="page-title" id="pageTitle">
+            <span v-if="activeTab === 'dashboard'">仪表盘总览</span>
             <span v-else-if="activeTab === 'explorer'">媒体库管理器</span>
             <span v-else-if="activeTab === 'verifier'">通道与节点管理</span>
             <span v-else-if="activeTab === 'sandbox'">API 联调沙盒</span>
-            <span v-else-if="activeTab === 'login'">管理员登录</span>
           </div>
         </div>
 
@@ -337,5 +343,21 @@ onUnmounted(() => {
   background: rgba(33, 150, 243, 0.1);
   border-color: rgba(33, 150, 243, 0.3);
   color: #64b5f6;
+}
+
+.main-wrapper.full-width {
+  margin-left: 0 !important;
+}
+
+.guest-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  user-select: none;
+  transition: opacity 0.2s;
+}
+
+.guest-brand:hover {
+  opacity: 0.85;
 }
 </style>
