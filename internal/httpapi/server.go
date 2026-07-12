@@ -497,6 +497,7 @@ func isBadRequestError(err error) bool {
 
 func writeJSON(w http.ResponseWriter, statusCode int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		http.Error(w, fmt.Sprintf("encode json failed: %v", err), http.StatusInternalServerError)

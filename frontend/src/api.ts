@@ -70,6 +70,13 @@ export async function apiRequest<T = any>(
     url = cleanBase + cleanPath
   }
 
+  // Prevent dynamic GET API requests from being cached by browser or CDN
+  const method = (options.method || 'GET').toUpperCase()
+  if (method === 'GET') {
+    const separator = url.includes('?') ? '&' : '?'
+    url = `${url}${separator}_t=${Date.now()}`
+  }
+
   const headers = new Headers(options.headers || {})
   if (token) {
     headers.set('Authorization', `Bearer ${token}`)
