@@ -1582,7 +1582,7 @@ const debugHTML = `<!doctype html>
       </div>
       <div class="m3-dialog-body">
         <p style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-bottom: 20px;">
-          文件最大支持限制：图片类最大 10MB (jpg/png/webp)，视频类最大 2GB (mp4/webm/mov)。
+          文件最大支持：图片 10MB，视频 2GB，音频与文档/压缩包 50MB。
         </p>
 
         <div class="form-field">
@@ -1596,9 +1596,11 @@ const debugHTML = `<!doctype html>
           <label>使用场景 (Usage)</label>
           <div class="input-wrapper">
             <select id="uploadUsage">
-              <option value="cover">cover (封面大图)</option>
-              <option value="scene">scene (场景/正片)</option>
+              <option value="cover">cover (封面/音频/普通文件)</option>
+              <option value="scene">scene (场景/视频正片)</option>
               <option value="avatar">avatar (头像/缩略图)</option>
+              <option value="audio">audio (音频专属)</option>
+              <option value="file">file (文档专属)</option>
             </select>
           </div>
         </div>
@@ -1613,7 +1615,7 @@ const debugHTML = `<!doctype html>
         <div class="form-field" style="margin-top: 16px;">
           <label>选择媒体文件</label>
           <div class="input-wrapper">
-            <input id="uploadFileInput" type="file" accept="image/*,video/*" />
+            <input id="uploadFileInput" type="file" accept="image/*,video/*,audio/*,.mp3,.ogg,.wav,.aac,.flac,.m4a,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z" />
           </div>
         </div>
       </div>
@@ -1970,14 +1972,20 @@ const debugHTML = `<!doctype html>
       }
 
       assetsList.forEach(function(asset) {
-        var isImage = asset.mimeType.startsWith('image/');
+        var isImage = asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic';
+        var isHEIC = asset.mimeType === 'image/heic';
         var isVideo = asset.mimeType.startsWith('video/');
+        var isAudio = asset.mimeType.startsWith('audio/');
         var previewHtml = '<span class="material-symbols-rounded file-icon">description</span>';
 
         if (isImage && asset.status === 'active') {
           previewHtml = '<img src="' + asset.publicUrl + '" alt="preview" loading="lazy" />';
+        } else if (isHEIC && asset.status === 'active') {
+          previewHtml = '<span class="material-symbols-rounded file-icon" style="color: #fbbf24;">image</span>';
         } else if (isVideo && asset.status === 'active') {
           previewHtml = '<span class="material-symbols-rounded file-icon" style="color: hsl(var(--md-sys-color-secondary));">video_library</span>';
+        } else if (isAudio && asset.status === 'active') {
+          previewHtml = '<span class="material-symbols-rounded file-icon" style="color: #a855f7;">headphones</span>';
         }
 
         var sizeStr = formatBytes(asset.sizeBytes);
@@ -2153,10 +2161,16 @@ const debugHTML = `<!doctype html>
       var body = document.getElementById('detailSheetBody');
 
       var preview = '';
-      if (asset.mimeType.startsWith('image/') && asset.status === 'active') {
+      if (asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active') {
         preview = '<div style="width: 100%; height: 180px; border-radius: 16px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,0.08);"><img src="' + asset.publicUrl + '" style="width:100%; height:100%; object-fit:contain;" /></div>';
+      } else if (asset.mimeType === 'image/heic' && asset.status === 'active') {
+        preview = '<div style="width: 100%; height: 180px; border-radius: 16px; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;"><span class="material-symbols-rounded" style="font-size: 48px; color: #fbbf24;">image</span><span style="font-size: 13px; color: #fff;">HEIC 格式原图</span></div>';
       } else if (asset.mimeType.startsWith('video/') && asset.status === 'active') {
         preview = '<video src="' + asset.publicUrl + '" controls style="width:100%; height:180px; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); object-fit:contain;"></video>';
+      } else if (asset.mimeType.startsWith('audio/') && asset.status === 'active') {
+        preview = '<div style="width: 100%; border-radius: 16px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); padding: 24px; display:flex; flex-direction:column; align-items:center; gap:12px;"><span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span><audio src="' + asset.publicUrl + '" controls style="width:100%;"></audio></div>';
+      } else if (asset.status === 'active') {
+        preview = '<div style="width: 100%; height: 120px; border-radius: 16px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;"><span class="material-symbols-rounded" style="font-size: 48px; color: hsl(var(--md-sys-color-primary));">description</span><span style="font-size: 13px; color: #fff;">文档/文件资源</span></div>';
       }
 
       body.innerHTML = 
