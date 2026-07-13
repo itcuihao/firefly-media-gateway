@@ -49,8 +49,8 @@ func TestNormalizeAndValidateMIME(t *testing.T) {
 		},
 		{
 			name:     "invalid",
-			fileName: "doc.pdf",
-			sniff:    []byte("%PDF"),
+			fileName: "doc.exe",
+			sniff:    []byte("MZ"),
 			wantErr:  true,
 		},
 	}

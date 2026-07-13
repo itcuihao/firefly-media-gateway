@@ -166,6 +166,22 @@ function extByMIME(mime: string) {
     'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-matroska': '.mkv',
     'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
     'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
+    'application/pdf': '.pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/msword': '.doc',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.ms-excel': '.xls',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    'application/vnd.ms-powerpoint': '.ppt',
+    'text/csv': '.csv',
+    'text/plain': '.txt',
+    'application/zip': '.zip',
+    'application/x-rar-compressed': '.rar',
+    'application/x-7z-compressed': '.7z',
+    'application/x-tar': '.tar',
+    'application/gzip': '.gz',
+    'application/json': '.json',
+    'text/yaml': '.yaml',
   }
   return map[mime] || ''
 }
@@ -203,6 +219,7 @@ onMounted(() => {
           <option value="image">图片类</option>
           <option value="video">视频类</option>
           <option value="audio">音频类</option>
+          <option value="file">文档/文件类</option>
         </select>
       </div>
 

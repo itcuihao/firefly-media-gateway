@@ -134,9 +134,13 @@ WHERE 1=1
 		argCount++
 	}
 	if filter.MediaType != "" {
-		sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
-		args = append(args, filter.MediaType+"/%")
-		argCount++
+		if filter.MediaType == "file" {
+			sb.WriteString(" AND (mime_type NOT ILIKE 'image/%' AND mime_type NOT ILIKE 'video/%' AND mime_type NOT ILIKE 'audio/%')")
+		} else {
+			sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
+			args = append(args, filter.MediaType+"/%")
+			argCount++
+		}
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
@@ -225,9 +229,13 @@ func (r *PostgresRepository) Count(ctx context.Context, filter media.ListFilter)
 		argCount++
 	}
 	if filter.MediaType != "" {
-		sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
-		args = append(args, filter.MediaType+"/%")
-		argCount++
+		if filter.MediaType == "file" {
+			sb.WriteString(" AND (mime_type NOT ILIKE 'image/%' AND mime_type NOT ILIKE 'video/%' AND mime_type NOT ILIKE 'audio/%')")
+		} else {
+			sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
+			args = append(args, filter.MediaType+"/%")
+			argCount++
+		}
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {

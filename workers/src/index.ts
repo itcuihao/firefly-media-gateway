@@ -92,6 +92,23 @@ const ALLOWED_MIME_TYPES = [
   'audio/aac',
   'audio/flac',
   'audio/mp4',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.ms-powerpoint',
+  'text/csv',
+  'text/plain',
+  'application/zip',
+  'application/x-rar-compressed',
+  'application/x-7z-compressed',
+  'application/x-tar',
+  'application/gzip',
+  'application/json',
+  'text/yaml',
+  'application/x-yaml',
 ];
 
 // 最大文件大小（Telegram 限制 50MB）

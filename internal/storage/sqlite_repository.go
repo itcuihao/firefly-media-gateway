@@ -165,8 +165,12 @@ WHERE 1=1
 		args = append(args, "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
 	}
 	if filter.MediaType != "" {
-		sb.WriteString(" AND mime_type LIKE ?")
-		args = append(args, filter.MediaType+"/%")
+		if filter.MediaType == "file" {
+			sb.WriteString(" AND (mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'video/%' AND mime_type NOT LIKE 'audio/%')")
+		} else {
+			sb.WriteString(" AND mime_type LIKE ?")
+			args = append(args, filter.MediaType+"/%")
+		}
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
@@ -246,8 +250,12 @@ func (r *SQLiteRepository) Count(ctx context.Context, filter media.ListFilter) (
 		args = append(args, "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
 	}
 	if filter.MediaType != "" {
-		sb.WriteString(" AND mime_type LIKE ?")
-		args = append(args, filter.MediaType+"/%")
+		if filter.MediaType == "file" {
+			sb.WriteString(" AND (mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'video/%' AND mime_type NOT LIKE 'audio/%')")
+		} else {
+			sb.WriteString(" AND mime_type LIKE ?")
+			args = append(args, filter.MediaType+"/%")
+		}
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {

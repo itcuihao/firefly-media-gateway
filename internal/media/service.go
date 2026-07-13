@@ -574,6 +574,38 @@ func mimeByExt(fileName string) string {
 		return "audio/flac"
 	case ".m4a":
 		return "audio/mp4"
+	case ".pdf":
+		return "application/pdf"
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".doc":
+		return "application/msword"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".xls":
+		return "application/vnd.ms-excel"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ".ppt":
+		return "application/vnd.ms-powerpoint"
+	case ".csv":
+		return "text/csv"
+	case ".txt":
+		return "text/plain"
+	case ".zip":
+		return "application/zip"
+	case ".rar":
+		return "application/x-rar-compressed"
+	case ".7z":
+		return "application/x-7z-compressed"
+	case ".tar":
+		return "application/x-tar"
+	case ".gz":
+		return "application/gzip"
+	case ".json":
+		return "application/json"
+	case ".yaml", ".yml":
+		return "text/yaml"
 	default:
 		return ""
 	}
@@ -587,6 +619,24 @@ func mediaKindByMIME(m string) string {
 		return "video"
 	case "audio/mpeg", "audio/ogg", "audio/wav", "audio/aac", "audio/flac", "audio/mp4":
 		return "audio"
+	case "application/pdf",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.ms-excel",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.ms-powerpoint",
+		"text/csv",
+		"text/plain",
+		"application/zip",
+		"application/x-rar-compressed",
+		"application/x-7z-compressed",
+		"application/x-tar",
+		"application/gzip",
+		"application/json",
+		"text/yaml",
+		"application/x-yaml":
+		return "file"
 	default:
 		return ""
 	}
@@ -630,6 +680,38 @@ func extByMIME(mimeType string) string {
 		return ".flac"
 	case "audio/mp4":
 		return ".m4a"
+	case "application/pdf":
+		return ".pdf"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return ".docx"
+	case "application/msword":
+		return ".doc"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return ".xlsx"
+	case "application/vnd.ms-excel":
+		return ".xls"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return ".pptx"
+	case "application/vnd.ms-powerpoint":
+		return ".ppt"
+	case "text/csv":
+		return ".csv"
+	case "text/plain":
+		return ".txt"
+	case "application/zip":
+		return ".zip"
+	case "application/x-rar-compressed":
+		return ".rar"
+	case "application/x-7z-compressed":
+		return ".7z"
+	case "application/x-tar":
+		return ".tar"
+	case "application/gzip":
+		return ".gz"
+	case "application/json":
+		return ".json"
+	case "text/yaml", "application/x-yaml":
+		return ".yaml"
 	default:
 		return ""
 	}

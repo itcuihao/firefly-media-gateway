@@ -42,15 +42,16 @@ const uploadUsage = ref('cover')
 const uploadIsMember = ref(false)
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const selectedFileKind = ref<'image' | 'video' | 'audio' | null>(null)
+const selectedFileKind = ref<'image' | 'video' | 'audio' | 'file' | null>(null)
 const selectedFileName = ref('')
 const dragOver = ref(false)
 
 const sizeLimitHint = computed(() => {
-  if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp)'
-  if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov)'
+  if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp/gif/svg/avif)'
+  if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov/mkv)'
   if (selectedFileKind.value === 'audio') return '音频最大 50MB (mp3/ogg/wav/aac/flac/m4a)'
-  return '文件最大支持限制：图片 10MB，视频 2GB，音频 50MB'
+  if (selectedFileKind.value === 'file') return '文档/压缩包最大 50MB (pdf/doc/docx/xls/xlsx/ppt/pptx/csv/txt/zip/rar/7z)'
+  return '支持图片 (最大10MB)、视频 (最大2GB)、音频与文档/压缩包 (最大50MB)'
 })
 
 function onFileSelected() {
@@ -61,16 +62,18 @@ function onFileSelected() {
     return
   }
   selectedFileName.value = file.name
+  const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
   if (file.type.startsWith('image/')) {
     selectedFileKind.value = 'image'
   } else if (file.type.startsWith('video/')) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
-  } else if (file.type.startsWith('audio/')) {
+  } else if (file.type.startsWith('audio/') || ext === '.mp3' || ext === '.wav' || ext === '.flac' || ext === '.ogg' || ext === '.aac' || ext === '.m4a') {
     selectedFileKind.value = 'audio'
     uploadUsage.value = 'audio'
   } else {
-    selectedFileKind.value = null
+    selectedFileKind.value = 'file'
+    uploadUsage.value = 'file'
   }
 }
 
@@ -81,16 +84,18 @@ function applyFile(file: File) {
     fileInputRef.value.files = dt.files
   }
   selectedFileName.value = file.name
+  const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
   if (file.type.startsWith('image/')) {
     selectedFileKind.value = 'image'
   } else if (file.type.startsWith('video/')) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
-  } else if (file.type.startsWith('audio/')) {
+  } else if (file.type.startsWith('audio/') || ext === '.mp3' || ext === '.wav' || ext === '.flac' || ext === '.ogg' || ext === '.aac' || ext === '.m4a') {
     selectedFileKind.value = 'audio'
     uploadUsage.value = 'audio'
   } else {
-    selectedFileKind.value = null
+    selectedFileKind.value = 'file'
+    uploadUsage.value = 'file'
   }
 }
 
@@ -597,22 +602,22 @@ onMounted(() => {
                @dragover.prevent="dragOver = true"
                @dragleave.prevent="dragOver = false"
                @drop.prevent="onDrop">
-            <input ref="fileInputRef" type="file" accept="image/*,video/*,audio/*,.mp3,.ogg,.wav,.aac,.flac,.m4a" @change="onFileSelected" style="display: none;" />
-            <template v-if="!selectedFileName">
-              <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary)); margin-bottom: 8px;">cloud_upload</span>
-              <p style="font-size: 14px; color: #fff; margin: 0;">点击或拖拽文件到此处</p>
-              <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 4px 0 0;">{{ sizeLimitHint }}</p>
-            </template>
-            <template v-else>
-              <span class="material-symbols-rounded" style="font-size: 28px; color: hsl(var(--md-sys-color-primary));">
-                {{ selectedFileKind === 'video' ? 'videocam' : selectedFileKind === 'audio' ? 'headphones' : 'image' }}
-              </span>
-              <div style="flex: 1; min-width: 0; margin-left: 12px;">
-                <p style="font-size: 14px; color: #fff; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ selectedFileName }}</p>
-                <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 2px 0 0;">
-                  {{ selectedFileKind === 'image' ? '图片文件' : selectedFileKind === 'video' ? '视频文件' : '音频文件' }}
-                </p>
-              </div>
+             <input ref="fileInputRef" type="file" accept="image/*,video/*,audio/*,.mp3,.ogg,.wav,.aac,.flac,.m4a,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z" @change="onFileSelected" style="display: none;" />
+             <template v-if="!selectedFileName">
+               <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary)); margin-bottom: 8px;">cloud_upload</span>
+               <p style="font-size: 14px; color: #fff; margin: 0;">点击或拖拽文件到此处</p>
+               <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 4px 0 0;">{{ sizeLimitHint }}</p>
+             </template>
+             <template v-else>
+               <span class="material-symbols-rounded" style="font-size: 28px; color: hsl(var(--md-sys-color-primary));">
+                 {{ selectedFileKind === 'video' ? 'videocam' : selectedFileKind === 'audio' ? 'headphones' : selectedFileKind === 'file' ? 'description' : 'image' }}
+               </span>
+               <div style="flex: 1; min-width: 0; margin-left: 12px;">
+                 <p style="font-size: 14px; color: #fff; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ selectedFileName }}</p>
+                 <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 2px 0 0;">
+                   {{ selectedFileKind === 'image' ? '图片文件' : selectedFileKind === 'video' ? '视频文件' : selectedFileKind === 'audio' ? '音频文件' : '文档/归档文件' }}
+                 </p>
+               </div>
               <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 4px 8px; flex-shrink: 0;" @click.stop="clearSelectedFile">
                 <span class="material-symbols-rounded" style="font-size: 16px;">close</span>
               </button>
@@ -648,6 +653,15 @@ onMounted(() => {
               </div>
             </div>
 
+            <div v-if="selectedFileKind === 'file'" class="form-field">
+              <label>使用场景 (Usage)</label>
+              <div class="input-wrapper">
+                <select v-model="uploadUsage">
+                  <option value="file">file (普通文档与归档文件)</option>
+                </select>
+              </div>
+            </div>
+
             <div v-if="selectedFileKind === 'image'" class="form-field">
               <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
                 <input type="checkbox" v-model="uploadAutoWebp" style="accent-color: hsl(var(--md-sys-color-primary));" />
@@ -677,8 +691,12 @@ onMounted(() => {
         <button class="m3-dialog-close" @click="closeDetailSheet">&times;</button>
       </div>
       <div class="m3-sheet-body" id="detailSheetBody" v-if="activeAsset">
-        <div v-if="activeAsset.mimeType.startsWith('image/') && activeAsset.status === 'active'" style="width: 100%; height: 180px; border-radius: 16px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,0.08);">
+        <div v-if="activeAsset.mimeType.startsWith('image/') && activeAsset.mimeType !== 'image/heic' && activeAsset.status === 'active'" style="width: 100%; height: 180px; border-radius: 16px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,0.08);">
           <img :src="activeAsset.publicUrl" style="width:100%; height:100%; object-fit:contain;" />
+        </div>
+        <div v-else-if="activeAsset.mimeType === 'image/heic' && activeAsset.status === 'active'" style="width: 100%; height: 180px; border-radius: 16px; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;">
+          <span class="material-symbols-rounded" style="font-size: 48px; color: #fbbf24;">image</span>
+          <span style="font-size: 13px; color: #fff;">HEIC 格式原图</span>
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
           <video :src="activeAsset.publicUrl" controls style="width:100%; max-height:320px; object-fit:contain;"></video>
@@ -686,6 +704,10 @@ onMounted(() => {
         <div v-else-if="activeAsset.mimeType.startsWith('audio/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); padding: 24px; display:flex; flex-direction:column; align-items:center; gap:12px;">
           <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
           <audio :src="activeAsset.publicUrl" controls style="width:100%;"></audio>
+        </div>
+        <div v-else-if="activeAsset.status === 'active'" style="width: 100%; height: 120px; border-radius: 16px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;">
+          <span class="material-symbols-rounded" style="font-size: 48px; color: hsl(var(--md-sys-color-primary));">description</span>
+          <span style="font-size: 13px; color: #fff;">文档/文件资源</span>
         </div>
         
         <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px; margin-top: 12px;">
