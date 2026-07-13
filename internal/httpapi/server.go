@@ -807,6 +807,18 @@ func extByMIME(mimeType string) string {
 		return ".webm"
 	case "video/quicktime":
 		return ".mov"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav":
+		return ".wav"
+	case "audio/aac":
+		return ".aac"
+	case "audio/flac":
+		return ".flac"
+	case "audio/mp4":
+		return ".m4a"
 	default:
 		return ""
 	}

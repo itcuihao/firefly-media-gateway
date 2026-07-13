@@ -21,6 +21,7 @@ const (
 	maxImageSizeBytes      int64 = 10 * 1024 * 1024   // 10MB for images
 	maxVideoSizeBytes      int64 = 50 * 1024 * 1024   // 50MB Telegram limit
 	maxVideoSizeBytesChunk int64 = 2000 * 1024 * 1024 // 2GB limit for chunking
+	maxAudioSizeBytes      int64 = 50 * 1024 * 1024   // 50MB for audio
 	chunkSize              int64 = 15 * 1024 * 1024   // 15MB per chunk (under Telegram download limit of 20MB)
 )
 
@@ -54,8 +55,9 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	if strings.TrimSpace(req.Project) == "" {
 		return Asset{}, fmt.Errorf("project is required")
 	}
-	if req.Usage != "cover" && req.Usage != "scene" {
-		return Asset{}, fmt.Errorf("usage must be cover or scene")
+	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true}
+	if !validUsages[req.Usage] {
+		return Asset{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio")
 	}
 	if strings.TrimSpace(req.FileName) == "" {
 		return Asset{}, fmt.Errorf("file name is required")
@@ -92,6 +94,9 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	}
 	if mediaKind == "video" && req.IsMember && sizeBytes > maxVideoSizeBytesChunk {
 		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytesChunk, ErrFileTooLarge)
+	}
+	if mediaKind == "audio" && sizeBytes > maxAudioSizeBytes {
+		return Asset{}, fmt.Errorf("audio exceeds %d bytes: %w", maxAudioSizeBytes, ErrFileTooLarge)
 	}
 
 	// Check if file already exists in active assets (Soft Deduplication - Scheme B)
@@ -526,6 +531,18 @@ func mimeByExt(fileName string) string {
 		return "video/webm"
 	case ".mov":
 		return "video/quicktime"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".ogg":
+		return "audio/ogg"
+	case ".wav":
+		return "audio/wav"
+	case ".aac":
+		return "audio/aac"
+	case ".flac":
+		return "audio/flac"
+	case ".m4a":
+		return "audio/mp4"
 	default:
 		return ""
 	}
@@ -537,6 +554,8 @@ func mediaKindByMIME(m string) string {
 		return "image"
 	case "video/mp4", "video/webm", "video/quicktime":
 		return "video"
+	case "audio/mpeg", "audio/ogg", "audio/wav", "audio/aac", "audio/flac", "audio/mp4":
+		return "audio"
 	default:
 		return ""
 	}
@@ -556,6 +575,18 @@ func extByMIME(mimeType string) string {
 		return ".webm"
 	case "video/quicktime":
 		return ".mov"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav":
+		return ".wav"
+	case "audio/aac":
+		return ".aac"
+	case "audio/flac":
+		return ".flac"
+	case "audio/mp4":
+		return ".m4a"
 	default:
 		return ""
 	}

@@ -67,7 +67,8 @@ const filteredAssets = computed(() => {
     // Media type check
     const matchesType = !mediaTypeFilter.value || 
       (mediaTypeFilter.value === 'image' && asset.mimeType.startsWith('image/')) ||
-      (mediaTypeFilter.value === 'video' && asset.mimeType.startsWith('video/'))
+      (mediaTypeFilter.value === 'video' && asset.mimeType.startsWith('video/')) ||
+      (mediaTypeFilter.value === 'audio' && asset.mimeType.startsWith('audio/'))
 
     return matchesKeyword && matchesProj && matchesUsage && matchesType
   })
@@ -134,6 +135,8 @@ function extByMIME(mime: string) {
   const map: Record<string, string> = {
     'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
     'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+    'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
+    'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
   }
   return map[mime] || ''
 }
@@ -169,6 +172,7 @@ onMounted(() => {
           <option value="">全部类别</option>
           <option value="image">图片类</option>
           <option value="video">视频类</option>
+          <option value="audio">音频类</option>
         </select>
       </div>
 
@@ -189,6 +193,10 @@ onMounted(() => {
         <div class="masonry-thumb">
           <img v-if="asset.mimeType.startsWith('image/')" :src="asset.publicUrl" alt="preview" loading="lazy" />
           <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted></video>
+          <div v-else-if="asset.mimeType.startsWith('audio/')" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
+            <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
+            <audio :src="asset.publicUrl" controls style="width:100%; max-width:240px;"></audio>
+          </div>
           <span v-else class="material-symbols-rounded">description</span>
 
           <span v-if="asset.mimeType.startsWith('image/')" class="media-badge media-type-image">
@@ -196,6 +204,9 @@ onMounted(() => {
           </span>
           <span v-else-if="asset.mimeType.startsWith('video/')" class="media-badge media-type-video">
             <span class="material-symbols-rounded" style="font-size: 12px;">play_arrow</span>
+          </span>
+          <span v-else-if="asset.mimeType.startsWith('audio/')" class="media-badge" style="background: rgba(168,85,247,0.25); color: #d8b4fe;">
+            <span class="material-symbols-rounded" style="font-size: 12px;">headphones</span>
           </span>
         </div>
         <div class="masonry-info">

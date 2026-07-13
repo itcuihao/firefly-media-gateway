@@ -32,14 +32,15 @@ const uploadUsage = ref('cover')
 const uploadIsMember = ref(false)
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const selectedFileKind = ref<'image' | 'video' | null>(null)
+const selectedFileKind = ref<'image' | 'video' | 'audio' | null>(null)
 const selectedFileName = ref('')
 const dragOver = ref(false)
 
 const sizeLimitHint = computed(() => {
   if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp)'
   if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov)'
-  return '文件最大支持限制：图片 10MB，视频 2GB'
+  if (selectedFileKind.value === 'audio') return '音频最大 50MB (mp3/ogg/wav/aac/flac/m4a)'
+  return '文件最大支持限制：图片 10MB，视频 2GB，音频 50MB'
 })
 
 function onFileSelected() {
@@ -55,6 +56,9 @@ function onFileSelected() {
   } else if (file.type.startsWith('video/')) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
+  } else if (file.type.startsWith('audio/')) {
+    selectedFileKind.value = 'audio'
+    uploadUsage.value = 'audio'
   } else {
     selectedFileKind.value = null
   }
@@ -72,6 +76,9 @@ function applyFile(file: File) {
   } else if (file.type.startsWith('video/')) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
+  } else if (file.type.startsWith('audio/')) {
+    selectedFileKind.value = 'audio'
+    uploadUsage.value = 'audio'
   } else {
     selectedFileKind.value = null
   }
@@ -80,7 +87,7 @@ function applyFile(file: File) {
 function onDrop(e: DragEvent) {
   dragOver.value = false
   const file = e.dataTransfer?.files?.[0]
-  if (file && (file.type.startsWith('image/') || file.type.startsWith('video/'))) {
+  if (file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/'))) {
     applyFile(file)
   }
 }
@@ -288,6 +295,8 @@ function extByMIME(mime: string) {
   const map: Record<string, string> = {
     'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
     'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+    'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
+    'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
   }
   return map[mime] || ''
 }
@@ -376,6 +385,10 @@ onMounted(() => {
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
           <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
           <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width:100%; height:100%; object-fit:cover;"></video>
+          <div v-else-if="asset.mimeType.startsWith('audio/') && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:8px; padding:12px;">
+            <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary));">music_note</span>
+            <audio :src="asset.publicUrl" controls style="width:100%; max-width:200px;"></audio>
+          </div>
           <span v-else class="material-symbols-rounded file-icon">description</span>
 
           <span v-if="asset.mimeType.startsWith('image/')" class="media-type-icon media-type-image">
@@ -383,6 +396,9 @@ onMounted(() => {
           </span>
           <span v-else-if="asset.mimeType.startsWith('video/')" class="media-type-icon media-type-video">
             <span class="material-symbols-rounded" style="font-size: 14px;">play_arrow</span>
+          </span>
+          <span v-else-if="asset.mimeType.startsWith('audio/')" class="media-type-icon" style="background: rgba(168,85,247,0.25); color: #d8b4fe;">
+            <span class="material-symbols-rounded" style="font-size: 14px;">headphones</span>
           </span>
 
           <span v-if="asset.isChunked" class="badge badge-primary" style="position: absolute; top: 8px; left: 8px;">分片上传</span>
@@ -435,6 +451,7 @@ onMounted(() => {
               <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
                 <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
                 <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+                <span v-else-if="asset.mimeType.startsWith('audio/')" class="material-symbols-rounded" style="font-size: 20px; color: #d8b4fe;">music_note</span>
                 <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">description</span>
               </div>
             </td>
@@ -489,7 +506,7 @@ onMounted(() => {
                @dragover.prevent="dragOver = true"
                @dragleave.prevent="dragOver = false"
                @drop.prevent="onDrop">
-            <input ref="fileInputRef" type="file" accept="image/*,video/*" @change="onFileSelected" style="display: none;" />
+            <input ref="fileInputRef" type="file" accept="image/*,video/*,audio/*,.mp3,.ogg,.wav,.aac,.flac,.m4a" @change="onFileSelected" style="display: none;" />
             <template v-if="!selectedFileName">
               <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary)); margin-bottom: 8px;">cloud_upload</span>
               <p style="font-size: 14px; color: #fff; margin: 0;">点击或拖拽文件到此处</p>
@@ -497,12 +514,12 @@ onMounted(() => {
             </template>
             <template v-else>
               <span class="material-symbols-rounded" style="font-size: 28px; color: hsl(var(--md-sys-color-primary));">
-                {{ selectedFileKind === 'video' ? 'videocam' : 'image' }}
+                {{ selectedFileKind === 'video' ? 'videocam' : selectedFileKind === 'audio' ? 'headphones' : 'image' }}
               </span>
               <div style="flex: 1; min-width: 0; margin-left: 12px;">
                 <p style="font-size: 14px; color: #fff; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ selectedFileName }}</p>
                 <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 2px 0 0;">
-                  {{ selectedFileKind === 'image' ? '图片文件' : '视频文件' }}
+                  {{ selectedFileKind === 'image' ? '图片文件' : selectedFileKind === 'video' ? '视频文件' : '音频文件' }}
                 </p>
               </div>
               <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 4px 8px; flex-shrink: 0;" @click.stop="clearSelectedFile">
@@ -526,6 +543,16 @@ onMounted(() => {
                   <option value="cover">cover (封面大图)</option>
                   <option value="scene">scene (场景/正片)</option>
                   <option value="avatar">avatar (头像/缩略图)</option>
+                </select>
+              </div>
+            </div>
+
+            <div v-if="selectedFileKind === 'audio'" class="form-field">
+              <label>使用场景 (Usage)</label>
+              <div class="input-wrapper">
+                <select v-model="uploadUsage">
+                  <option value="audio">audio (音频文件)</option>
+                  <option value="scene">scene (场景音效)</option>
                 </select>
               </div>
             </div>
@@ -564,6 +591,10 @@ onMounted(() => {
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
           <video :src="activeAsset.publicUrl" controls style="width:100%; max-height:320px; object-fit:contain;"></video>
+        </div>
+        <div v-else-if="activeAsset.mimeType.startsWith('audio/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); padding: 24px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+          <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
+          <audio :src="activeAsset.publicUrl" controls style="width:100%;"></audio>
         </div>
         
         <div style="display: flex; flex-direction: column; gap: 14px; font-size: 13px; margin-top: 12px;">

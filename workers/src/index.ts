@@ -79,6 +79,12 @@ const ALLOWED_MIME_TYPES = [
   'video/mp4',
   'video/webm',
   'video/quicktime',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/wav',
+  'audio/aac',
+  'audio/flac',
+  'audio/mp4',
 ];
 
 // 最大文件大小（Telegram 限制 50MB）
