@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, inject } from 'vue'
+import { ref, onMounted, computed, watch, inject } from 'vue'
 import { apiRequest, openMediaAsset } from '../api'
 import type { MediaAsset } from '../api'
 
@@ -8,21 +8,79 @@ const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('sho
 const loading = ref(true)
 const assets = ref<MediaAsset[]>([])
 
-// Query Filters
+// Query Filters & Search Debounce
+const searchQueryInput = ref('')
 const searchKeyword = ref('')
 const selectedProject = ref('')
 const selectedUsage = ref('')
-const mediaTypeFilter = ref('') // 'image' | 'video' | ''
+const mediaTypeFilter = ref('') // 'image' | 'video' | 'audio' | ''
+
+const projectsList = ref<string[]>([])
+const usagesList = ref<string[]>([])
+
+// Pagination
+const PAGE_SIZE = 20
+const offset = ref(0)
+const totalCount = ref(0)
+const hasMore = computed(() => assets.value.length < totalCount.value)
 
 // Details dialog states
 const activeAsset = ref<MediaAsset | null>(null)
 const detailsOpen = ref(false)
 
-async function fetchAssets() {
+// Debounce search input
+let debounceTimer: any = null
+watch(searchQueryInput, (newVal) => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => {
+    searchKeyword.value = newVal.trim()
+  }, 300)
+})
+
+async function fetchMetadata() {
+  try {
+    const [projs, usgs] = await Promise.all([
+      apiRequest<string[]>('/api/v1/media/projects'),
+      apiRequest<string[]>('/api/v1/media/usages')
+    ])
+    projectsList.value = projs || []
+    usagesList.value = usgs || []
+  } catch (err: any) {
+    console.error('获取过滤标签失败:', err)
+  }
+}
+
+async function fetchAssets(reset = false) {
+  if (reset) {
+    offset.value = 0
+    assets.value = []
+  }
   loading.value = true
   try {
-    const data = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
-    assets.value = data || []
+    const params = new URLSearchParams()
+    params.set('limit', String(PAGE_SIZE))
+    params.set('offset', String(offset.value))
+    if (selectedProject.value) params.set('project', selectedProject.value)
+    if (selectedUsage.value) params.set('usage', selectedUsage.value)
+    if (searchKeyword.value) params.set('search', searchKeyword.value)
+    if (mediaTypeFilter.value) params.set('type', mediaTypeFilter.value)
+
+    interface MediaResponse {
+      total: number
+      limit: number
+      offset: number
+      items: MediaAsset[]
+    }
+
+    const data = await apiRequest<MediaResponse>(`/api/v1/media?${params.toString()}`)
+    if (data && data.items) {
+      if (reset) {
+        assets.value = data.items
+      } else {
+        assets.value = [...assets.value, ...data.items]
+      }
+      totalCount.value = data.total || 0
+    }
   } catch (err: any) {
     showToast(err.message || '拉取资源失败', 'error')
   } finally {
@@ -30,49 +88,19 @@ async function fetchAssets() {
   }
 }
 
-// Populate filters dynamically based on loaded assets
-const projectsList = computed(() => {
-  const projects = new Set<string>()
-  assets.value.forEach(asset => {
-    if (asset.project) projects.add(asset.project)
-  })
-  return Array.from(projects)
+function loadMore() {
+  if (loading.value || !hasMore.value) return
+  offset.value += PAGE_SIZE
+  fetchAssets(false)
+}
+
+// Watch filters
+watch([selectedProject, selectedUsage, mediaTypeFilter, searchKeyword], () => {
+  fetchAssets(true)
 })
 
-const usagesList = computed(() => {
-  const usages = new Set<string>()
-  assets.value.forEach(asset => {
-    if (asset.usage) usages.add(asset.usage)
-  })
-  return Array.from(usages)
-})
-
-// Filter assets
-const filteredAssets = computed(() => {
-  const keyword = searchKeyword.value.trim().toLowerCase()
-  return assets.value.filter(asset => {
-    // Hide deleted files in public gallery view
-    if (asset.status !== 'active') return false
-
-    // Keyword check
-    const matchesKeyword = !keyword || 
-      asset.mediaId.toLowerCase().includes(keyword) || 
-      (asset.mimeType && asset.mimeType.toLowerCase().includes(keyword)) ||
-      (asset.project && asset.project.toLowerCase().includes(keyword))
-
-    // Project check
-    const matchesProj = !selectedProject.value || asset.project === selectedProject.value
-    // Usage check
-    const matchesUsage = !selectedUsage.value || asset.usage === selectedUsage.value
-    // Media type check
-    const matchesType = !mediaTypeFilter.value || 
-      (mediaTypeFilter.value === 'image' && asset.mimeType.startsWith('image/')) ||
-      (mediaTypeFilter.value === 'video' && asset.mimeType.startsWith('video/')) ||
-      (mediaTypeFilter.value === 'audio' && asset.mimeType.startsWith('audio/'))
-
-    return matchesKeyword && matchesProj && matchesUsage && matchesType
-  })
-})
+// Since filtering is done server-side, filteredAssets is just the assets array
+const filteredAssets = computed(() => assets.value)
 
 function openDetails(asset: MediaAsset) {
   activeAsset.value = asset
@@ -134,7 +162,8 @@ function copyText(txt: string, typeName: string) {
 function extByMIME(mime: string) {
   const map: Record<string, string> = {
     'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
-    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+    'image/svg+xml': '.svg', 'image/avif': '.avif', 'image/heic': '.heic', 'image/x-icon': '.ico', 'image/vnd.microsoft.icon': '.ico',
+    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-matroska': '.mkv',
     'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
     'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
   }
@@ -150,7 +179,8 @@ function downloadMediaAsset(asset: MediaAsset) {
 }
 
 onMounted(() => {
-  fetchAssets()
+  fetchMetadata()
+  fetchAssets(true)
 })
 </script>
 
@@ -159,7 +189,7 @@ onMounted(() => {
     <!-- Filter bar -->
     <div class="m3-card media-filter-bar">
       <div class="filter-inputs">
-        <input class="filter-input search-field" v-model="searchKeyword" placeholder="搜索资源 ID 或项目标签..." />
+        <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或项目标签..." />
         <select class="filter-input" v-model="selectedProject">
           <option value="">全部项目 (Projects)</option>
           <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
@@ -176,7 +206,7 @@ onMounted(() => {
         </select>
       </div>
 
-      <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="fetchAssets" :disabled="loading">
+      <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="fetchAssets(true)" :disabled="loading">
         <span class="material-symbols-rounded" style="font-size: 16px;">refresh</span>
         <span>刷新列表</span>
       </button>
@@ -191,7 +221,11 @@ onMounted(() => {
     <div v-else-if="filteredAssets.length > 0" class="masonry-wrapper">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)">
         <div class="masonry-thumb">
-          <img v-if="asset.mimeType.startsWith('image/')" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic'" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <div v-else-if="asset.mimeType === 'image/heic'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
+            <span class="material-symbols-rounded" style="font-size: 48px; color: #fbbf24;">image</span>
+            <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 格式原图</span>
+          </div>
           <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted></video>
           <div v-else-if="asset.mimeType.startsWith('audio/')" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
             <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
@@ -217,6 +251,15 @@ onMounted(() => {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Load More Button -->
+    <div v-if="hasMore" style="display: flex; justify-content: center; margin-top: 32px; margin-bottom: 24px;">
+      <button class="m3-btn m3-btn-primary" @click="loadMore" :disabled="loading" style="padding: 10px 24px; border-radius: 100px; display: flex; align-items: center; gap: 8px; font-weight: 600; box-shadow: var(--md-sys-elevation-2);">
+        <span v-if="loading" class="material-symbols-rounded rotate-sync" style="font-size: 20px;">sync</span>
+        <span v-else class="material-symbols-rounded" style="font-size: 20px;">expand_more</span>
+        <span>加载更多 (已展示 {{ assets.length }} / 共 {{ totalCount }} 条)</span>
+      </button>
     </div>
 
     <div v-else class="gallery-empty">

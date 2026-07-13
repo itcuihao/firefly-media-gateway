@@ -99,18 +99,84 @@ RETURNING
 	return asset, nil
 }
 
-func (r *PostgresRepository) List(ctx context.Context, limit, offset int) ([]media.Asset, error) {
-	const q = `
+func (r *PostgresRepository) List(ctx context.Context, filter media.ListFilter) ([]media.Asset, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
 	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 FROM media_assets
-ORDER BY created_at DESC
-LIMIT $1 OFFSET $2
-`
+WHERE 1=1
+`)
 
-	rows, err := r.db.QueryContext(ctx, q, limit, offset)
+	argCount := 1
+
+	if filter.Project != "" {
+		sb.WriteString(fmt.Sprintf(" AND project = $%d", argCount))
+		args = append(args, filter.Project)
+		argCount++
+	}
+	if filter.Usage != "" {
+		sb.WriteString(fmt.Sprintf(" AND usage = $%d", argCount))
+		args = append(args, filter.Usage)
+		argCount++
+	}
+	if filter.Status != "" {
+		sb.WriteString(fmt.Sprintf(" AND status = $%d", argCount))
+		args = append(args, filter.Status)
+		argCount++
+	}
+	if filter.Search != "" {
+		sb.WriteString(fmt.Sprintf(" AND (id::text ILIKE $%d OR project ILIKE $%d OR usage ILIKE $%d)", argCount, argCount, argCount))
+		args = append(args, "%"+filter.Search+"%")
+		argCount++
+	}
+	if filter.MediaType != "" {
+		sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
+		args = append(args, filter.MediaType+"/%")
+		argCount++
+	}
+
+	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range filter.PrivateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			sb.WriteString(" AND 1=0") // No public access allowed
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+				args = append(args, rule)
+				argCount++
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s) AND usage NOT IN (%s)", inList, inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY created_at DESC")
+
+	if filter.Limit > 0 {
+		sb.WriteString(fmt.Sprintf(" LIMIT $%d", argCount))
+		args = append(args, filter.Limit)
+		argCount++
+	}
+	if filter.Offset > 0 {
+		sb.WriteString(fmt.Sprintf(" OFFSET $%d", argCount))
+		args = append(args, filter.Offset)
+		argCount++
+	}
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list media assets: %w", err)
 	}
@@ -129,6 +195,169 @@ LIMIT $1 OFFSET $2
 	}
 
 	return assets, nil
+}
+
+func (r *PostgresRepository) Count(ctx context.Context, filter media.ListFilter) (int, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`SELECT COUNT(*) FROM media_assets WHERE 1=1`)
+
+	argCount := 1
+
+	if filter.Project != "" {
+		sb.WriteString(fmt.Sprintf(" AND project = $%d", argCount))
+		args = append(args, filter.Project)
+		argCount++
+	}
+	if filter.Usage != "" {
+		sb.WriteString(fmt.Sprintf(" AND usage = $%d", argCount))
+		args = append(args, filter.Usage)
+		argCount++
+	}
+	if filter.Status != "" {
+		sb.WriteString(fmt.Sprintf(" AND status = $%d", argCount))
+		args = append(args, filter.Status)
+		argCount++
+	}
+	if filter.Search != "" {
+		sb.WriteString(fmt.Sprintf(" AND (id::text ILIKE $%d OR project ILIKE $%d OR usage ILIKE $%d)", argCount, argCount, argCount))
+		args = append(args, "%"+filter.Search+"%")
+		argCount++
+	}
+	if filter.MediaType != "" {
+		sb.WriteString(fmt.Sprintf(" AND mime_type ILIKE $%d", argCount))
+		args = append(args, filter.MediaType+"/%")
+		argCount++
+	}
+
+	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range filter.PrivateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return 0, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+				args = append(args, rule)
+				argCount++
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s) AND usage NOT IN (%s)", inList, inList))
+		}
+	}
+
+	var count int
+	err := r.db.QueryRowContext(ctx, sb.String(), args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count media assets: %w", err)
+	}
+	return count, nil
+}
+
+func (r *PostgresRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString("SELECT DISTINCT project FROM media_assets WHERE project <> ''")
+
+	argCount := 1
+	if onlyPublic && len(privateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range privateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return []string{}, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+				args = append(args, rule)
+				argCount++
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s)", inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY project ASC")
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("get distinct projects: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+func (r *PostgresRepository) GetDistinctUsages(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString("SELECT DISTINCT usage FROM media_assets WHERE usage <> ''")
+
+	argCount := 1
+	if onlyPublic && len(privateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range privateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return []string{}, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+				args = append(args, rule)
+				argCount++
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND usage NOT IN (%s)", inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY usage ASC")
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("get distinct usages: %w", err)
+	}
+	defer rows.Close()
+
+	var usages []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		usages = append(usages, u)
+	}
+	return usages, nil
 }
 
 func (r *PostgresRepository) SaveChunks(ctx context.Context, assetID string, chunks []media.Chunk) error {

@@ -225,8 +225,7 @@ func (g *Gateway) handleListObjects(w http.ResponseWriter, r *http.Request, buck
 		fmt.Sscanf(l, "%d", &limit)
 	}
 
-	// 调用列举服务
-	assets, err := g.mediaService.List(ctx, limit, 0)
+	assets, _, err := g.mediaService.List(ctx, media.ListFilter{Limit: limit, Offset: 0})
 	if err != nil {
 		g.writeError(w, "ListFailed", err.Error(), http.StatusInternalServerError)
 		return

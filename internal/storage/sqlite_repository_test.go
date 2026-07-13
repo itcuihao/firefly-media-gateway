@@ -72,7 +72,7 @@ func TestSQLiteRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("unexpected provider location: %#v", got.ProviderBucketOrChat)
 	}
 
-	list, err := repo.List(ctx, 10, 0)
+	list, err := repo.List(ctx, media.ListFilter{Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("list assets: %v", err)
 	}

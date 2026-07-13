@@ -1859,7 +1859,11 @@ const debugHTML = `<!doctype html>
         }
 
         var data = await res.json();
-        state.assets = data || [];
+        var assets = data;
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+          assets = data.items || [];
+        }
+        state.assets = assets || [];
         
         // Extract project and usage metadata
         state.projects.clear();

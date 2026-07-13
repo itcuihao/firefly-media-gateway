@@ -76,9 +76,16 @@ const ALLOWED_MIME_TYPES = [
   'image/jpeg',
   'image/png',
   'image/webp',
+  'image/gif',
+  'image/svg+xml',
+  'image/avif',
+  'image/heic',
+  'image/x-icon',
+  'image/vnd.microsoft.icon',
   'video/mp4',
   'video/webm',
   'video/quicktime',
+  'video/x-matroska',
   'audio/mpeg',
   'audio/ogg',
   'audio/wav',
@@ -825,9 +832,22 @@ function extByMIME(mimeType: string): string {
     case 'image/jpeg': return '.jpg';
     case 'image/png': return '.png';
     case 'image/webp': return '.webp';
+    case 'image/gif': return '.gif';
+    case 'image/svg+xml': return '.svg';
+    case 'image/avif': return '.avif';
+    case 'image/heic': return '.heic';
+    case 'image/x-icon':
+    case 'image/vnd.microsoft.icon': return '.ico';
     case 'video/mp4': return '.mp4';
     case 'video/webm': return '.webm';
     case 'video/quicktime': return '.mov';
+    case 'video/x-matroska': return '.mkv';
+    case 'audio/mpeg': return '.mp3';
+    case 'audio/ogg': return '.ogg';
+    case 'audio/wav': return '.wav';
+    case 'audio/aac': return '.aac';
+    case 'audio/flac': return '.flac';
+    case 'audio/mp4': return '.m4a';
     default: return '';
   }
 }

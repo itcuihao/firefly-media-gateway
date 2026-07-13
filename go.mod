@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/KarpelesLab/gowebp v0.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -18,6 +19,7 @@ require (
 	github.com/qkzsky/go-qt-faststart v0.0.0-20181128120044-2fb99300755f // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/crypto v0.37.0 // indirect
+	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.24.0 // indirect

@@ -34,6 +34,20 @@ func TestNormalizeAndValidateMIME(t *testing.T) {
 			wantKind: "video",
 		},
 		{
+			name:     "gif by extension",
+			fileName: "a.gif",
+			sniff:    []byte("GIF89a"),
+			wantMIME: "image/gif",
+			wantKind: "image",
+		},
+		{
+			name:     "mkv by extension",
+			fileName: "movie.mkv",
+			sniff:    []byte("unknown"),
+			wantMIME: "video/x-matroska",
+			wantKind: "video",
+		},
+		{
 			name:     "invalid",
 			fileName: "doc.pdf",
 			sniff:    []byte("%PDF"),
@@ -136,7 +150,19 @@ func (r *fakeRepository) MarkDeleted(_ context.Context, id string) (Asset, error
 	return r.asset, nil
 }
 
-func (r *fakeRepository) List(context.Context, int, int) ([]Asset, error) {
+func (r *fakeRepository) List(context.Context, ListFilter) ([]Asset, error) {
+	return nil, nil
+}
+
+func (r *fakeRepository) Count(context.Context, ListFilter) (int, error) {
+	return 0, nil
+}
+
+func (r *fakeRepository) GetDistinctProjects(context.Context, bool, []string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *fakeRepository) GetDistinctUsages(context.Context, bool, []string) ([]string, error) {
 	return nil, nil
 }
 

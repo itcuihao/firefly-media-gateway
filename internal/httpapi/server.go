@@ -8,16 +8,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"firefly-media-gateway/internal/media"
 	"firefly-media-gateway/internal/provider"
+
+	"github.com/KarpelesLab/gowebp"
+	_ "golang.org/x/image/bmp"
 )
 
 const maxRequestBodyBytes int64 = 2005 * 1024 * 1024 // 2GB + 5MB buffer
@@ -64,6 +72,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/media", s.handleListMedia)
+	mux.HandleFunc("GET /api/v1/media/projects", s.handleGetProjects)
+	mux.HandleFunc("GET /api/v1/media/usages", s.handleGetUsages)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
 	mux.HandleFunc("DELETE /api/v1/media/{mediaId}", s.withAuth(s.handleDelete))
 	mux.HandleFunc("GET /api/v1/telegram/chat-ids", s.withAuth(s.handleGetTelegramChatIDs))
@@ -223,7 +233,109 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r) {
+		if s.tryServeWebPCache(w, r, mediaID, streamInfo) {
+			return
+		}
+	}
+
 	s.proxySingleMedia(w, r, streamInfo)
+}
+
+func clientAcceptsWebP(r *http.Request) bool {
+	if r.URL.Query().Get("format") == "webp" {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	return strings.Contains(strings.ToLower(accept), "image/webp")
+}
+
+func isCompressibleImage(mime string) bool {
+	m := strings.ToLower(strings.TrimSpace(mime))
+	return m == "image/jpeg" || m == "image/png" || m == "image/jpg"
+}
+
+func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, mediaID string, streamInfo media.StreamInfo) bool {
+	cacheDir := "data/cache"
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		s.logger.Printf("[WEBP] failed to create cache directory: %v", err)
+		return false
+	}
+
+	cachePath := filepath.Join(cacheDir, mediaID+".webp")
+	
+	// If cache exists, serve it
+	if _, err := os.Stat(cachePath); err == nil {
+		s.logger.Printf("[WEBP] serving cached WebP for %q", mediaID)
+		w.Header().Set("Content-Type", "image/webp")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
+		http.ServeFile(w, r, cachePath)
+		return true
+	}
+
+	// Try to convert on-the-fly and save to cache
+	s.logger.Printf("[WEBP] cache miss for %q, downloading and converting...", mediaID)
+	
+	// Download original image
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, streamInfo.StreamURL, nil)
+	if err != nil {
+		s.logger.Printf("[WEBP] failed to build download request: %v", err)
+		return false
+	}
+	for k, v := range streamInfo.Headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.logger.Printf("[WEBP] failed to download original image: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Printf("[WEBP] download failed with status: %d", resp.StatusCode)
+		return false
+	}
+
+	// Decode image
+	img, _, err := image.Decode(resp.Body)
+	if err != nil {
+		s.logger.Printf("[WEBP] failed to decode image: %v", err)
+		return false
+	}
+
+	// Convert and save
+	tmpFile, err := os.CreateTemp(cacheDir, "webp-tmp-*")
+	if err != nil {
+		s.logger.Printf("[WEBP] failed to create temp file: %v", err)
+		return false
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpName)
+	}()
+
+	err = gowebp.Encode(tmpFile, img, &gowebp.Options{Lossy: true, Quality: 80})
+	if err != nil {
+		s.logger.Printf("[WEBP] failed to encode to WebP: %v", err)
+		return false
+	}
+	tmpFile.Close()
+
+	// Rename temp file to target cache path atomically
+	if err := os.Rename(tmpName, cachePath); err != nil {
+		s.logger.Printf("[WEBP] failed to save cache file: %v", err)
+		return false
+	}
+
+	s.logger.Printf("[WEBP] successfully created cache for %q", mediaID)
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
+	http.ServeFile(w, r, cachePath)
+	return true
 }
 
 func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
@@ -581,7 +693,32 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	assets, err := s.svc.List(r.Context(), limit, offset)
+	filter := media.ListFilter{
+		Limit:        limit,
+		Offset:       offset,
+		Project:      r.URL.Query().Get("project"),
+		Usage:        r.URL.Query().Get("usage"),
+		Search:       r.URL.Query().Get("search"),
+		MediaType:    r.URL.Query().Get("type"),
+		OnlyPublic:   !hasAuth,
+		PrivateRules: s.privateRules,
+	}
+
+	// Status filtering based on auth and parameter
+	status := r.URL.Query().Get("status")
+	if !hasAuth {
+		filter.Status = media.StatusActive
+	} else {
+		if status == "deleted" {
+			filter.Status = media.StatusDeleted
+		} else if status == "all" {
+			filter.Status = "" // Empty matches all statuses
+		} else {
+			filter.Status = media.StatusActive // Default to active for admin too
+		}
+	}
+
+	assets, totalCount, err := s.svc.List(r.Context(), filter)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
@@ -589,15 +726,49 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 
 	var signedAssets []media.Asset
 	for _, asset := range assets {
-		isPublic := s.isAssetPublic(asset)
-		if !isPublic && !hasAuth {
-			// Skip private assets for unauthenticated visitors
-			continue
-		}
 		signedAssets = append(signedAssets, s.signAssetURL(asset))
 	}
 
-	writeJSON(w, http.StatusOK, signedAssets)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":  totalCount,
+		"limit":  limit,
+		"offset": offset,
+		"items":  signedAssets,
+	})
+}
+
+func (s *Server) handleGetProjects(w http.ResponseWriter, r *http.Request) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	expected := "Bearer " + s.authToken
+	hasAuth := auth == expected
+
+	onlyPublic := !hasAuth
+	projects, err := s.svc.GetProjects(r.Context(), onlyPublic, s.privateRules)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	if projects == nil {
+		projects = []string{}
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) handleGetUsages(w http.ResponseWriter, r *http.Request) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	expected := "Bearer " + s.authToken
+	hasAuth := auth == expected
+
+	onlyPublic := !hasAuth
+	usages, err := s.svc.GetUsages(r.Context(), onlyPublic, s.privateRules)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	if usages == nil {
+		usages = []string{}
+	}
+	writeJSON(w, http.StatusOK, usages)
 }
 
 func (s *Server) handleGetTelegramChatIDs(w http.ResponseWriter, r *http.Request) {

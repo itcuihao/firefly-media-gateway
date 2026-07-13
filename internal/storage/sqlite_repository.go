@@ -136,18 +136,74 @@ RETURNING
 	return asset, nil
 }
 
-func (r *SQLiteRepository) List(ctx context.Context, limit, offset int) ([]media.Asset, error) {
-	const q = `
+func (r *SQLiteRepository) List(ctx context.Context, filter media.ListFilter) ([]media.Asset, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`
 SELECT
 	id, provider, provider_file_id, provider_bucket_or_chat,
 	public_url, mime_type, size_bytes, sha256,
 	project, usage, status, created_at, updated_at, deleted_at, is_chunked
 FROM media_assets
-ORDER BY created_at DESC
-LIMIT ? OFFSET ?
-`
+WHERE 1=1
+`)
 
-	rows, err := r.db.QueryContext(ctx, q, limit, offset)
+	if filter.Project != "" {
+		sb.WriteString(" AND project = ?")
+		args = append(args, filter.Project)
+	}
+	if filter.Usage != "" {
+		sb.WriteString(" AND usage = ?")
+		args = append(args, filter.Usage)
+	}
+	if filter.Status != "" {
+		sb.WriteString(" AND status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.Search != "" {
+		sb.WriteString(" AND (id LIKE ? OR project LIKE ? OR usage LIKE ?)")
+		args = append(args, "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
+	}
+	if filter.MediaType != "" {
+		sb.WriteString(" AND mime_type LIKE ?")
+		args = append(args, filter.MediaType+"/%")
+	}
+
+	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range filter.PrivateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			sb.WriteString(" AND 1=0") // No public access allowed
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, "?")
+				args = append(args, rule)
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s) AND usage NOT IN (%s)", inList, inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY created_at DESC")
+
+	if filter.Limit > 0 {
+		sb.WriteString(" LIMIT ?")
+		args = append(args, filter.Limit)
+	}
+	if filter.Offset > 0 {
+		sb.WriteString(" OFFSET ?")
+		args = append(args, filter.Offset)
+	}
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list media assets: %w", err)
 	}
@@ -166,6 +222,157 @@ LIMIT ? OFFSET ?
 	}
 
 	return assets, nil
+}
+
+func (r *SQLiteRepository) Count(ctx context.Context, filter media.ListFilter) (int, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`SELECT COUNT(*) FROM media_assets WHERE 1=1`)
+
+	if filter.Project != "" {
+		sb.WriteString(" AND project = ?")
+		args = append(args, filter.Project)
+	}
+	if filter.Usage != "" {
+		sb.WriteString(" AND usage = ?")
+		args = append(args, filter.Usage)
+	}
+	if filter.Status != "" {
+		sb.WriteString(" AND status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.Search != "" {
+		sb.WriteString(" AND (id LIKE ? OR project LIKE ? OR usage LIKE ?)")
+		args = append(args, "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
+	}
+	if filter.MediaType != "" {
+		sb.WriteString(" AND mime_type LIKE ?")
+		args = append(args, filter.MediaType+"/%")
+	}
+
+	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range filter.PrivateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return 0, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, "?")
+				args = append(args, rule)
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s) AND usage NOT IN (%s)", inList, inList))
+		}
+	}
+
+	var count int
+	err := r.db.QueryRowContext(ctx, sb.String(), args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count media assets: %w", err)
+	}
+	return count, nil
+}
+
+func (r *SQLiteRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString("SELECT DISTINCT project FROM media_assets WHERE project <> ''")
+
+	if onlyPublic && len(privateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range privateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return []string{}, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, "?")
+				args = append(args, rule)
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s)", inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY project ASC")
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("get distinct projects: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+func (r *SQLiteRepository) GetDistinctUsages(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString("SELECT DISTINCT usage FROM media_assets WHERE usage <> ''")
+
+	if onlyPublic && len(privateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range privateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return []string{}, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, "?")
+				args = append(args, rule)
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND usage NOT IN (%s)", inList))
+		}
+	}
+
+	sb.WriteString(" ORDER BY usage ASC")
+
+	rows, err := r.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("get distinct usages: %w", err)
+	}
+	defer rows.Close()
+
+	var usages []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		usages = append(usages, u)
+	}
+	return usages, nil
 }
 
 func (r *SQLiteRepository) SaveChunks(ctx context.Context, assetID string, chunks []media.Chunk) error {

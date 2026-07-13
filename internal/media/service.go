@@ -274,17 +274,36 @@ func (s *Service) GetMeta(ctx context.Context, id string) (Asset, error) {
 	return s.repo.GetByID(ctx, id)
 }
 
-func (s *Service) List(ctx context.Context, limit, offset int) ([]Asset, error) {
-	if limit <= 0 {
-		limit = 20
+func (s *Service) List(ctx context.Context, filter ListFilter) ([]Asset, int, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 20
 	}
-	if limit > 100 {
-		limit = 100
+	if filter.Limit > 500 {
+		filter.Limit = 500
 	}
-	if offset < 0 {
-		offset = 0
+	if filter.Offset < 0 {
+		filter.Offset = 0
 	}
-	return s.repo.List(ctx, limit, offset)
+
+	assets, err := s.repo.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	total, err := s.repo.Count(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return assets, total, nil
+}
+
+func (s *Service) GetProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	return s.repo.GetDistinctProjects(ctx, onlyPublic, privateRules)
+}
+
+func (s *Service) GetUsages(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+	return s.repo.GetDistinctUsages(ctx, onlyPublic, privateRules)
 }
 
 func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, error) {
@@ -525,12 +544,24 @@ func mimeByExt(fileName string) string {
 		return "image/png"
 	case ".webp":
 		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
+	case ".avif":
+		return "image/avif"
+	case ".heic":
+		return "image/heic"
+	case ".ico":
+		return "image/x-icon"
 	case ".mp4":
 		return "video/mp4"
 	case ".webm":
 		return "video/webm"
 	case ".mov":
 		return "video/quicktime"
+	case ".mkv":
+		return "video/x-matroska"
 	case ".mp3":
 		return "audio/mpeg"
 	case ".ogg":
@@ -550,9 +581,9 @@ func mimeByExt(fileName string) string {
 
 func mediaKindByMIME(m string) string {
 	switch m {
-	case "image/jpeg", "image/png", "image/webp":
+	case "image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml", "image/avif", "image/heic", "image/x-icon", "image/vnd.microsoft.icon":
 		return "image"
-	case "video/mp4", "video/webm", "video/quicktime":
+	case "video/mp4", "video/webm", "video/quicktime", "video/x-matroska":
 		return "video"
 	case "audio/mpeg", "audio/ogg", "audio/wav", "audio/aac", "audio/flac", "audio/mp4":
 		return "audio"
@@ -569,12 +600,24 @@ func extByMIME(mimeType string) string {
 		return ".png"
 	case "image/webp":
 		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
+	case "image/avif":
+		return ".avif"
+	case "image/heic":
+		return ".heic"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return ".ico"
 	case "video/mp4":
 		return ".mp4"
 	case "video/webm":
 		return ".webm"
 	case "video/quicktime":
 		return ".mov"
+	case "video/x-matroska":
+		return ".mkv"
 	case "audio/mpeg":
 		return ".mp3"
 	case "audio/ogg":

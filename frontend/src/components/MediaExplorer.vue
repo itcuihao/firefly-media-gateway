@@ -15,11 +15,21 @@ const loading = ref(false)
 const assets = ref<MediaAsset[]>([])
 const layoutMode = ref<'grid' | 'list'>('grid')
 
-// Query Filters
+// Query Filters & Search Debounce
+const searchQueryInput = ref('')
 const searchKeyword = ref('')
 const selectedProject = ref('')
 const selectedUsage = ref('')
 const showDeleted = ref(false)
+
+const projectsList = ref<string[]>([])
+const usagesList = ref<string[]>([])
+
+// Pagination
+const currentPage = ref(1)
+const pageSize = ref(20)
+const totalCount = ref(0)
+const totalPages = computed(() => Math.ceil(totalCount.value / pageSize.value))
 
 // Details Drawer state
 const sheetActive = ref(false)
@@ -98,54 +108,90 @@ function clearSelectedFile() {
   if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
-// Computed dynamic options for filters based on loaded media list
-const projectsList = computed(() => {
-  const projects = new Set<string>()
-  assets.value.forEach(asset => {
-    if (asset.project) projects.add(asset.project)
-  })
-  return Array.from(projects)
+// Debounce search input
+let debounceTimer: any = null
+watch(searchQueryInput, (newVal) => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => {
+    searchKeyword.value = newVal.trim()
+  }, 300)
 })
 
-const usagesList = computed(() => {
-  const usages = new Set<string>()
-  assets.value.forEach(asset => {
-    if (asset.usage) usages.add(asset.usage)
-  })
-  return Array.from(usages)
-})
+async function fetchMetadata() {
+  try {
+    const [projs, usgs] = await Promise.all([
+      apiRequest<string[]>('/api/v1/media/projects'),
+      apiRequest<string[]>('/api/v1/media/usages')
+    ])
+    projectsList.value = projs || []
+    usagesList.value = usgs || []
+  } catch (err: any) {
+    console.error('获取过滤标签失败:', err)
+  }
+}
 
-// Filter Logic
-const filteredAssets = computed(() => {
-  const keyword = searchKeyword.value.trim().toLowerCase()
-  return assets.value.filter(asset => {
-    // Keyword check
-    const matchesKeyword = !keyword || 
-      asset.mediaId.toLowerCase().includes(keyword) || 
-      (asset.mimeType && asset.mimeType.toLowerCase().includes(keyword)) ||
-      (asset.project && asset.project.toLowerCase().includes(keyword))
-
-    // Project check
-    const matchesProj = !selectedProject.value || asset.project === selectedProject.value
-    // Usage check
-    const matchesUsage = !selectedUsage.value || asset.usage === selectedUsage.value
-    // Status check
-    const matchesStatus = showDeleted.value || asset.status === 'active'
-
-    return matchesKeyword && matchesProj && matchesUsage && matchesStatus
-  })
-})
+// Filter Logic - since server filters, filteredAssets is just the current page assets
+const filteredAssets = computed(() => assets.value)
 
 async function fetchAssets() {
   loading.value = true
   try {
-    const data = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
-    assets.value = data
+    const params = new URLSearchParams()
+    params.set('limit', String(pageSize.value))
+    params.set('offset', String((currentPage.value - 1) * pageSize.value))
+    if (selectedProject.value) params.set('project', selectedProject.value)
+    if (selectedUsage.value) params.set('usage', selectedUsage.value)
+    if (searchKeyword.value) params.set('search', searchKeyword.value)
+    if (showDeleted.value) {
+      params.set('status', 'all')
+    } else {
+      params.set('status', 'active')
+    }
+
+    interface MediaResponse {
+      total: number
+      limit: number
+      offset: number
+      items: MediaAsset[]
+    }
+
+    const data = await apiRequest<MediaResponse>(`/api/v1/media?${params.toString()}`)
+    if (data) {
+      assets.value = data.items || []
+      totalCount.value = data.total || 0
+    }
   } catch (err: any) {
     showToast(err.message || '拉取资源失败', 'error')
   } finally {
     loading.value = false
   }
+}
+
+// Watch filters - reset to page 1
+watch([selectedProject, selectedUsage, showDeleted, searchKeyword, pageSize], () => {
+  currentPage.value = 1
+  fetchAssets()
+})
+
+// Watch page change
+watch(currentPage, () => {
+  fetchAssets()
+})
+
+function prevPage() {
+  if (currentPage.value > 1) currentPage.value--
+}
+
+function nextPage() {
+  if (currentPage.value < totalPages.value) currentPage.value++
+}
+
+function firstPage() {
+  currentPage.value = 1
+}
+
+function lastPage() {
+  if (totalPages.value > 0) currentPage.value = totalPages.value
 }
 
 function setExplorerLayout(layout: 'grid' | 'list') {
@@ -263,6 +309,7 @@ async function submitUploadFile() {
     })
     showToast('媒体文件上传成功！')
     fetchAssets()
+    fetchMetadata()
   } catch (e: any) {
     showToast(e.message || '上传失败', 'error')
   }
@@ -277,6 +324,7 @@ async function deleteAsset(mediaId: string) {
     })
     showToast('媒体资源已成功标记删除！')
     fetchAssets()
+    fetchMetadata()
     closeDetailSheet()
   } catch (e: any) {
     showToast(e.message || '删除失败', 'error')
@@ -294,7 +342,8 @@ function copyText(txt: string) {
 function extByMIME(mime: string) {
   const map: Record<string, string> = {
     'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
-    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+    'image/svg+xml': '.svg', 'image/avif': '.avif', 'image/heic': '.heic', 'image/x-icon': '.ico', 'image/vnd.microsoft.icon': '.ico',
+    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-matroska': '.mkv',
     'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
     'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
   }
@@ -345,7 +394,7 @@ onMounted(() => {
     <!-- Filters Card -->
     <div class="m3-card media-filter-bar">
       <div class="filter-inputs">
-        <input class="filter-input search-field" v-model="searchKeyword" placeholder="搜索资源 ID 或 MIME 格式..." />
+        <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或 MIME 格式..." />
         <select class="filter-input" v-model="selectedProject">
           <option value="">全部项目 (Projects)</option>
           <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
@@ -383,7 +432,11 @@ onMounted(() => {
     <div v-if="layoutMode === 'grid' && filteredAssets.length > 0" class="media-grid">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
-          <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <div v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:4px; padding:12px;">
+            <span class="material-symbols-rounded" style="font-size: 36px; color: #fbbf24;">image</span>
+            <span style="font-size: 10px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 原图</span>
+          </div>
           <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width:100%; height:100%; object-fit:cover;"></video>
           <div v-else-if="asset.mimeType.startsWith('audio/') && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:8px; padding:12px;">
             <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary));">music_note</span>
@@ -449,7 +502,8 @@ onMounted(() => {
           <tr v-for="asset in filteredAssets" :key="asset.mediaId">
             <td>
               <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
-                <img v-if="asset.mimeType.startsWith('image/') && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
+                <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
+                <span v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" class="material-symbols-rounded" style="font-size: 20px; color: #fbbf24;" title="HEIC 格式图片">image</span>
                 <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width: 100%; height: 100%; object-fit: cover;"></video>
                 <span v-else-if="asset.mimeType.startsWith('audio/')" class="material-symbols-rounded" style="font-size: 20px; color: #d8b4fe;">music_note</span>
                 <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">description</span>
@@ -485,6 +539,43 @@ onMounted(() => {
     <div v-else style="text-align: center; padding: 80px 0; color: hsl(var(--md-sys-color-on-surface-variant));">
       <span class="material-symbols-rounded" style="font-size: 64px; color: rgba(255,255,255,0.08); margin-bottom: 16px;">folder_off</span>
       <p style="font-size: 15px;">未检索到符合条件的媒体资源文件</p>
+    </div>
+
+    <!-- Pagination bar -->
+    <div v-if="totalCount > 0" class="m3-card" style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-top: 24px; padding: 12px 24px; border-radius: 16px; background: rgba(19, 27, 32, 0.4); border: 1px solid rgba(255, 255, 255, 0.04); margin-bottom: 16px;">
+      <div style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); display: flex; align-items: center; gap: 12px;">
+        <span>共 <strong>{{ totalCount }}</strong> 条数据</span>
+        <span style="color: rgba(255,255,255,0.15)">|</span>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span>每页</span>
+          <select v-model="pageSize" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; color: #fff; padding: 4px 8px; font-size: 12px; outline: none; cursor: pointer;">
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="50">50</option>
+          </select>
+          <span>条</span>
+        </div>
+      </div>
+      
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 8px; min-width: auto; border-radius: 8px; display: inline-flex; align-items: center;" :disabled="currentPage === 1" @click="firstPage" title="第一页">
+          <span class="material-symbols-rounded" style="font-size: 18px;">first_page</span>
+        </button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 8px; min-width: auto; border-radius: 8px; display: inline-flex; align-items: center;" :disabled="currentPage === 1" @click="prevPage" title="上一页">
+          <span class="material-symbols-rounded" style="font-size: 18px;">chevron_left</span>
+        </button>
+        
+        <span style="font-size: 13px; color: #fff; padding: 0 8px;">
+          第 <strong>{{ currentPage }}</strong> / {{ totalPages || 1 }} 页
+        </span>
+        
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 8px; min-width: auto; border-radius: 8px; display: inline-flex; align-items: center;" :disabled="currentPage >= totalPages" @click="nextPage" title="下一页">
+          <span class="material-symbols-rounded" style="font-size: 18px;">chevron_right</span>
+        </button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 6px 8px; min-width: auto; border-radius: 8px; display: inline-flex; align-items: center;" :disabled="currentPage >= totalPages" @click="lastPage" title="最后一页">
+          <span class="material-symbols-rounded" style="font-size: 18px;">last_page</span>
+        </button>
+      </div>
     </div>
 
     <!-- Floating Action Button -->
