@@ -101,6 +101,12 @@ func openRepository(ctx context.Context, cfg config.Config) (*sql.DB, media.Repo
 			db.Close()
 			return nil, nil, fmt.Errorf("postgres not ready: %w", err)
 		}
+		// Recycle connections before NAT/firewall idle timeouts on the public
+		// internet silently drop them. Without this, the pool hands out dead
+		// connections after the process sits idle, and queries start returning
+		// 500 (observed on the projects/usages endpoints after ~15min).
+		db.SetConnMaxLifetime(5 * time.Minute)
+		db.SetConnMaxIdleTime(2 * time.Minute)
 		return db, storage.NewPostgresRepository(db), nil
 	case "sqlite":
 		if err := ensureSQLiteDir(cfg.DatabaseURL); err != nil {
