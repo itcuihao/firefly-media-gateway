@@ -92,7 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/provider/discord/guilds", s.withAuth(s.handleDiscordGuilds))
 	mux.HandleFunc("POST /api/v1/provider/worker/verify", s.withAuth(s.handleWorkerVerify))
 
-	return s.withLogging(mux)
+	return s.withCORS(s.withLogging(mux))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -645,6 +645,30 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// withCORS handles CORS preflight requests and injects permissive CORS
+// headers on every response. The gateway uses Bearer tokens (not cookies),
+// so we mirror the worker's policy (workers/src/index.ts handleOptions) by
+// reflecting the request Origin, allowing any front-end domain to call the
+// API directly. Without this, browsers block cross-origin requests because
+// the method-scoped ServeMux answers OPTIONS with 405.
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	const allowedHeaders = "Authorization, Content-Type, X-Bot-Name, X-Worker-Base-URL, X-Worker-Auth-Token, X-Storage-Mode, X-Project, X-Usage"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS, HEAD")
+			w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
