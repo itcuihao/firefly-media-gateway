@@ -288,7 +288,7 @@ onUnmounted(() => {
             <div class="form-field">
               <label>API 基础地址</label>
               <div class="input-wrapper">
-                <input v-model="baseUrl" type="text" placeholder="http://localhost:8080" />
+                <input v-model="baseUrl" type="text" placeholder="https://firefly.haocit.com" />
               </div>
             </div>
             <div class="form-field">

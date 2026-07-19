@@ -23,7 +23,7 @@ const sandboxMode = ref('rest')
 const activeS3Client = ref('aws')
 
 const s3Endpoint = computed(() => {
-  const baseUrl = getApiBaseUrl() || 'http://localhost:8088'
+  const baseUrl = getApiBaseUrl() || 'https://firefly.haocit.com'
   const cleanBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
   return `${cleanBase}/s3`
 })
@@ -282,7 +282,7 @@ const generatedCurl = computed(() => {
   }
 
   // Constructing the curl command string
-  let curl = `curl -X ${method} "${cleanBase || 'http://localhost:8080'}${path}${queryParams}"`
+  let curl = `curl -X ${method} "${cleanBase || 'https://firefly.haocit.com'}${path}${queryParams}"`
 
   // Add headers
   for (const [key, val] of Object.entries(headers)) {
