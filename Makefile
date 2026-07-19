@@ -20,7 +20,7 @@ all: build
 # ── 生产构建（前端 + Go 二进制一体打包）──────────────
 build: frontend-build
 	@echo "📦 正在编译 Go 服务端二进制..."
-	$(GO_CMD) build -o $(BINARY) ./cmd/server
+	$(GO_CMD) build -ldflags "-X main.commit=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" -o $(BINARY) ./cmd/server
 	@echo "✅ 编译完成: $(BINARY)"
 
 # ── 编译后直接运行 ────────────────────────────────────

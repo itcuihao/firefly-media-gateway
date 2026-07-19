@@ -25,6 +25,10 @@ import (
 	"firefly-media-gateway/internal/storage"
 )
 
+// commit is the short git hash injected at build time via -ldflags.
+// Defaults to "unknown" when built without the flag (e.g. plain `go run`).
+var commit = "unknown"
+
 func main() {
 	logger := log.New(os.Stdout, "[media-gateway] ", log.LstdFlags|log.Lmicroseconds)
 
@@ -44,7 +48,7 @@ func main() {
 	}
 
 	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
-	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PublicBaseURL, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), logger)
+	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PublicBaseURL, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), commit, logger)
 
 	// 创建 S3 Gateway（可选）
 	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)

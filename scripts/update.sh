@@ -32,7 +32,7 @@ git pull
 
 # 3. 强制无缓存编译最新的 Docker 镜像
 log "构建最新 Docker 镜像（包含前端打包和 Go 二进制编译，不使用缓存确保代码更新）..."
-docker build --no-cache -t firefly-media-gateway:latest .
+docker build --no-cache --build-arg VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -t firefly-media-gateway:latest .
 
 # 4. 重新启动并应用新镜像
 log "更新并重启 Docker 容器..."

@@ -119,6 +119,7 @@ function handleWindowClick(e: MouseEvent) {
 
 const activeWorkerName = ref('')
 const isWorkerMode = ref(false)
+const appCommit = ref('')
 
 async function updateActiveWorkerStatus() {
   let storageDriver = 'telegram'
@@ -128,6 +129,7 @@ async function updateActiveWorkerStatus() {
     const health = await apiRequest<HealthInfo>('/api/v1/health')
     storageDriver = health.storage_driver || 'telegram'
     workerUrl = health.worker_url || ''
+    appCommit.value = health.commit || ''
   } catch (_) {
     // Fallback to local storage logic if health check fails
     const activeUrl = localStorage.getItem('active_worker_url') || ''
@@ -229,6 +231,7 @@ onUnmounted(() => {
           </li>
         </template>
       </ul>
+      <div class="nav-commit" :title="`build ${appCommit || 'unknown'}`">build {{ appCommit || 'unknown' }}</div>
     </nav>
 
     <!-- Content Workspace -->
@@ -359,5 +362,15 @@ onUnmounted(() => {
 
 .guest-brand:hover {
   opacity: 0.85;
+}
+
+.nav-commit {
+  padding: 10px 20px 16px;
+  text-align: center;
+  font-size: 11px;
+  font-family: monospace;
+  color: hsl(var(--md-sys-color-on-surface-variant));
+  opacity: 0.55;
+  user-select: text;
 }
 </style>

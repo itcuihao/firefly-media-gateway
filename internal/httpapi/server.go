@@ -40,10 +40,11 @@ type Server struct {
 	privateRules     []string
 	databaseDriver   string
 	storageMode      string
+	commit           string
 	logger           *log.Logger
 }
 
-func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode string, logger *log.Logger) *Server {
+func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode, commit string, logger *log.Logger) *Server {
 	return &Server{
 		svc:              svc,
 		authToken:        authToken,
@@ -54,6 +55,7 @@ func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, w
 		privateRules:     privateRules,
 		databaseDriver:   databaseDriver,
 		storageMode:      storageMode,
+		commit:           commit,
 		logger:           logger,
 	}
 }
@@ -117,6 +119,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":          "ok",
 		"time":            time.Now().UTC(),
+		"commit":          s.commit,
 		"database_driver": s.databaseDriver,
 		"storage_driver":  storageMode,
 		"worker_url":      workerURL,

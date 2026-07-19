@@ -138,7 +138,7 @@ elif [ "$DEPLOY_OPTION" = "2" ]; then
         fi
         # 编译前端和后端
         cd frontend && npm install --prefer-offline && npm run build && cd ..
-        go build -o ./server ./cmd/server
+        go build -ldflags "-X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" -o ./server ./cmd/server
         ok "前端与 Go 服务端编译完成！"
     fi
     

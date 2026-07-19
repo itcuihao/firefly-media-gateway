@@ -54,7 +54,7 @@ jobs:
             git checkout ${{ steps.tag.outputs.TAG }}
             # If it's a branch, pull the latest changes; if it's a tag, git pull might do nothing but checkout is sufficient.
             git pull || true
-            docker build -t firefly-media-gateway:${{ steps.tag.outputs.TAG }} -t firefly-media-gateway:latest .
+            docker build --build-arg VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -t firefly-media-gateway:${{ steps.tag.outputs.TAG }} -t firefly-media-gateway:latest .
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
             sleep 5

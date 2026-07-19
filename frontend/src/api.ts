@@ -35,6 +35,7 @@ export interface HealthInfo {
   database_driver?: string
   rules_count?: number
   worker_url?: string
+  commit?: string
 }
 
 // Global configuration helpers

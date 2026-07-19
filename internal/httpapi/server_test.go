@@ -110,7 +110,7 @@ func TestDynamicWebPConversion(t *testing.T) {
 	svc := media.NewService(repo, map[string]provider.StorageProvider{"mock": prov}, "mock", "http://localhost:8080")
 
 	logger := log.New(io.Discard, "", 0)
-	srv := NewServer(svc, "test-token", "", "", "", "http://localhost:8080", nil, "sqlite", "direct", logger)
+	srv := NewServer(svc, "test-token", "", "", "", "http://localhost:8080", nil, "sqlite", "direct", "test-commit", logger)
 
 	// 5. Test Case 1: Request with Accept: image/webp
 	req := httptest.NewRequest("GET", "/api/v1/media/test-img", nil)

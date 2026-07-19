@@ -21,7 +21,11 @@ COPY . .
 # Overlay frontend build output into uiembed/dist for go:embed
 COPY --from=frontend /app/uiembed/dist ./uiembed/dist/
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/media-gateway ./cmd/server
+# VERSION is the short git hash, resolved on the host and passed via --build-arg
+# (.dockerignore excludes .git, so git is unavailable inside the build context).
+ARG VERSION=unknown
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+      -ldflags "-X main.commit=${VERSION}" -o /out/media-gateway ./cmd/server
 
 # ---- Stage 3: Minimal runtime ----
 FROM gcr.io/distroless/static-debian12
