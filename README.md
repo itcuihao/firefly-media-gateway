@@ -367,13 +367,18 @@ PUBLIC_BASE_URL=https://your-domain.com
 
 #### 3. CI/CD 与自动化版本 Tag 规范
 
-代码合并推送到 `main` 分支时，GitHub Actions 会根据最近一次提交的 **Commit Message 前缀（约定式提交）** 自动计算并生成语义化 Tag，随后自动部署：
+本项目采用清晰受控的按需发版机制：
 
-| Commit 前缀 | 含义 | 对应版本递增 | 示例 |
+- **日常开发合并到 `main`**：GitHub Actions 仅运行自动化代码测试（`go test` 与 `go vet`），**不生成任何 Tag，不触发生产环境部署**，保证主分支时刻处于健康可发布状态。
+- **按需触发发版（创建 Tag 并自动部署）**：当决定发布上线时，只需在提交说明中使用 **`release:` 前缀**（或包含 `[release]`）：
+
+| 发版 Commit 示例 | 触发行为 | 对应版本递增 | 效果说明 |
 | :--- | :--- | :--- | :--- |
-| **`fix:`** / **`perf:`** / **`refactor:`** / **`chore:`** / 其他 | 日常修复与调优 | **Patch +1**（修订号） | `v0.2.0` ➔ `v0.2.1` |
-| **`feat:`** / **`feat(模块):`** | 新增业务功能特性 | **Minor +1**（次版本号） | `v0.2.0` ➔ `v0.3.0` |
-| **`feat!:`** / **`fix!:`** / 正文含 `BREAKING CHANGE:` | 破坏性大版本重构 | **Major +1**（主版本号） | `v0.2.0` ➔ `v1.0.0` |
+| `release: fix: 修复流式播放偶发超时` | 触发发版 | **Patch +1**（修订号） | `v0.2.1` ➔ `v0.2.2` 并部署 |
+| `release: feat: 增加 WebDAV 协议支持` | 触发发版 | **Minor +1**（次版本号） | `v0.2.1` ➔ `v0.3.0` 并部署 |
+| `release: feat!: 重构底层存储驱动` | 触发发版 | **Major +1**（主版本号） | `v0.2.1` ➔ `v1.0.0` 并部署 |
+| `release: v1.0.0` | 触发发版 | **指定版本** | 直接发布为 `v1.0.0` 并部署 |
+| `release: 2026中秋维护版` | 触发发版 | **默认 Patch +1** | `v0.2.1` ➔ `v0.2.2` 并部署 |
 
 也可手动打 Tag 推送触发部署：
 
@@ -382,7 +387,7 @@ git tag v1.0.0
 git push github v1.0.0
 ```
 
-也可在 GitHub Actions 页面手动触发（`workflow_dispatch`）。
+或在 GitHub Actions 页面手动点击触发（`workflow_dispatch`）。
 
 ---
 
