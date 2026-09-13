@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"firefly-media-gateway/internal/provider"
 
@@ -18,11 +20,11 @@ import (
 )
 
 const (
-	maxImageSizeBytes      int64 = 10 * 1024 * 1024   // 10MB for images
-	maxVideoSizeBytes      int64 = 50 * 1024 * 1024   // 50MB Telegram limit
-	maxVideoSizeBytesChunk int64 = 2000 * 1024 * 1024 // 2GB limit for chunking
-	maxAudioSizeBytes      int64 = 50 * 1024 * 1024   // 50MB for audio
-	chunkSize              int64 = 15 * 1024 * 1024   // 15MB per chunk (under Telegram download limit of 20MB)
+	maxImageSizeBytes int64 = 10 * 1024 * 1024   // 10MB for images
+	maxVideoSizeBytes int64 = 2000 * 1024 * 1024 // 2GB limit for videos
+	maxAudioSizeBytes int64 = 50 * 1024 * 1024   // 50MB for audio
+	maxFileSizeBytes  int64 = 500 * 1024 * 1024  // 500MB for generic files
+	chunkSize         int64 = 15 * 1024 * 1024   // 15MB per chunk (under Telegram download limit of 20MB)
 )
 
 type UploadRequest struct {
@@ -31,23 +33,31 @@ type UploadRequest struct {
 	FileName            string
 	DeclaredContentType string
 	Reader              io.Reader
-	IsMember            bool // Enable chunked upload for large videos
+	IsMember            bool // Deprecated: preserved for backward compatibility; all uploads auto-chunk
 	OverrideProvider    provider.StorageProvider
 }
 
 type Service struct {
-	repo            Repository
-	providers       map[string]provider.StorageProvider
-	defaultProvider string
-	publicBaseURL   string
+	repo              Repository
+	providers         map[string]provider.StorageProvider
+	defaultProvider   string
+	publicBaseURL     string
+	uploadConcurrency int
 }
 
 func NewService(repo Repository, providers map[string]provider.StorageProvider, defaultProvider, publicBaseURL string) *Service {
 	return &Service{
-		repo:            repo,
-		providers:       providers,
-		defaultProvider: defaultProvider,
-		publicBaseURL:   strings.TrimRight(publicBaseURL, "/"),
+		repo:              repo,
+		providers:         providers,
+		defaultProvider:   defaultProvider,
+		publicBaseURL:     strings.TrimRight(publicBaseURL, "/"),
+		uploadConcurrency: 3,
+	}
+}
+
+func (s *Service) SetUploadConcurrency(c int) {
+	if c > 0 {
+		s.uploadConcurrency = c
 	}
 }
 
@@ -55,9 +65,9 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	if strings.TrimSpace(req.Project) == "" {
 		return Asset{}, fmt.Errorf("project is required")
 	}
-	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true}
+	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
 	if !validUsages[req.Usage] {
-		return Asset{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio")
+		return Asset{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
 	}
 	if strings.TrimSpace(req.FileName) == "" {
 		return Asset{}, fmt.Errorf("file name is required")
@@ -89,14 +99,14 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	if mediaKind == "image" && sizeBytes > maxImageSizeBytes {
 		return Asset{}, fmt.Errorf("image exceeds %d bytes: %w", maxImageSizeBytes, ErrFileTooLarge)
 	}
-	if mediaKind == "video" && !req.IsMember && sizeBytes > maxVideoSizeBytes {
-		return Asset{}, fmt.Errorf("video exceeds %d bytes (upgrade to member for larger files): %w", maxVideoSizeBytes, ErrFileTooLarge)
-	}
-	if mediaKind == "video" && req.IsMember && sizeBytes > maxVideoSizeBytesChunk {
-		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytesChunk, ErrFileTooLarge)
+	if mediaKind == "video" && sizeBytes > maxVideoSizeBytes {
+		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytes, ErrFileTooLarge)
 	}
 	if mediaKind == "audio" && sizeBytes > maxAudioSizeBytes {
 		return Asset{}, fmt.Errorf("audio exceeds %d bytes: %w", maxAudioSizeBytes, ErrFileTooLarge)
+	}
+	if mediaKind == "file" && sizeBytes > maxFileSizeBytes {
+		return Asset{}, fmt.Errorf("file exceeds %d bytes: %w", maxFileSizeBytes, ErrFileTooLarge)
 	}
 
 	// Check if file already exists in active assets (Soft Deduplication - Scheme B)
@@ -156,12 +166,12 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		}
 	}
 
-	// Check if chunking is needed
-	if sizeBytes <= chunkSize || !req.IsMember {
+	// Check if chunking is needed (auto-chunk videos exceeding chunk size)
+	if sizeBytes <= chunkSize || mediaKind != "video" {
 		return s.uploadSingle(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
 	}
 
-	// Chunked upload for large videos (member only)
+	// Chunked upload for large videos
 	return s.uploadChunked(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
 }
 
@@ -208,33 +218,117 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 // uploadChunked handles chunked upload for large videos
 func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider, tmpFile *os.File, req UploadRequest, mimeType string, sizeBytes int64, shaHex string) (Asset, error) {
 	chunkCount := int((sizeBytes + chunkSize - 1) / chunkSize)
-	chunks := make([]Chunk, 0, chunkCount)
-	var providerBucketOrChat *string
+	chunks := make([]Chunk, chunkCount)
+
+	concurrency := s.uploadConcurrency
+	if concurrency <= 0 {
+		concurrency = 3
+	}
+	if concurrency > chunkCount {
+		concurrency = chunkCount
+	}
+
+	type chunkTask struct {
+		index int
+	}
+	type chunkResult struct {
+		index                int
+		chunkFileID          string
+		providerBucketOrChat *string
+		err                  error
+	}
+
+	taskCh := make(chan chunkTask, chunkCount)
+	resCh := make(chan chunkResult, chunkCount)
 
 	for i := 0; i < chunkCount; i++ {
-		start := int64(i) * chunkSize
-		if _, err := tmpFile.Seek(start, io.SeekStart); err != nil {
-			return Asset{}, fmt.Errorf("seek temp file to chunk %d failed: %w", i, err)
-		}
+		taskCh <- chunkTask{index: i}
+	}
+	close(taskCh)
 
-		chunkReader := io.LimitReader(tmpFile, chunkSize)
-		chunkName := fmt.Sprintf("%s.chunk%d", req.FileName, i)
-		upResult, err := p.Upload(ctx, provider.UploadInput{
-			FileName: chunkName,
-			MIMEType: mimeType,
-			Reader:   chunkReader,
-		})
-		if err != nil {
-			return Asset{}, fmt.Errorf("upload chunk %d failed: %w", i, err)
-		}
+	var wg sync.WaitGroup
+	ctxWorker, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
 
-		chunks = append(chunks, Chunk{
-			ChunkIndex:  i,
-			ChunkFileID: upResult.ProviderFileID,
-		})
-		if providerBucketOrChat == nil {
-			providerBucketOrChat = upResult.ProviderBucketOrChat
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskCh {
+				select {
+				case <-ctxWorker.Done():
+					resCh <- chunkResult{index: task.index, err: ctxWorker.Err()}
+					continue
+				default:
+				}
+
+				start := int64(task.index) * chunkSize
+				currentChunkSize := chunkSize
+				if start+currentChunkSize > sizeBytes {
+					currentChunkSize = sizeBytes - start
+				}
+
+				var upResult provider.UploadResult
+				var uploadErr error
+
+				// Retry up to 3 times per chunk
+				for attempt := 0; attempt < 3; attempt++ {
+					chunkReader := io.NewSectionReader(tmpFile, start, currentChunkSize)
+					chunkName := fmt.Sprintf("%s.chunk%d", req.FileName, task.index)
+					upResult, uploadErr = p.Upload(ctxWorker, provider.UploadInput{
+						FileName: chunkName,
+						MIMEType: mimeType,
+						Reader:   chunkReader,
+					})
+					if uploadErr == nil {
+						break
+					}
+					select {
+					case <-ctxWorker.Done():
+						uploadErr = ctxWorker.Err()
+						break
+					case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+					}
+				}
+
+				if uploadErr != nil {
+					cancelWorker()
+					resCh <- chunkResult{index: task.index, err: uploadErr}
+					return
+				}
+
+				resCh <- chunkResult{
+					index:                task.index,
+					chunkFileID:          upResult.ProviderFileID,
+					providerBucketOrChat: upResult.ProviderBucketOrChat,
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(resCh)
+
+	var firstErr error
+	var providerBucketOrChat *string
+
+	for res := range resCh {
+		if res.err != nil && firstErr == nil {
+			firstErr = res.err
 		}
+		if res.err == nil {
+			chunks[res.index] = Chunk{
+				ChunkIndex:  res.index,
+				ChunkFileID: res.chunkFileID,
+			}
+			if providerBucketOrChat == nil && res.providerBucketOrChat != nil {
+				providerBucketOrChat = res.providerBucketOrChat
+			}
+		}
+	}
+
+	if firstErr != nil {
+		return Asset{}, fmt.Errorf("chunked upload failed: %w", firstErr)
 	}
 
 	assetID := newUUID()
@@ -384,22 +478,63 @@ func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider p
 		return StreamInfo{}, fmt.Errorf("get chunks: %w", err)
 	}
 
-	chunkURLs := make([]string, 0, len(chunks))
+	chunkURLs := make([]string, len(chunks))
 	var headers map[string]string
-	for _, c := range chunks {
-		cr, err := p.GetAccess(ctx, c.ChunkFileID, asset.ProviderBucketOrChat)
-		if err != nil {
-			return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", err)
+	var headersMu sync.Mutex
+
+	type chunkAccessResult struct {
+		index  int
+		url    string
+		header http.Header
+		err    error
+	}
+
+	resCh := make(chan chunkAccessResult, len(chunks))
+	sem := make(chan struct{}, 5) // max 5 concurrent requests to TG
+
+	for i, c := range chunks {
+		go func(idx int, ch Chunk) {
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				resCh <- chunkAccessResult{index: idx, err: ctx.Err()}
+				return
+			}
+
+			cr, err := p.GetAccess(ctx, ch.ChunkFileID, asset.ProviderBucketOrChat)
+			if err != nil {
+				resCh <- chunkAccessResult{index: idx, err: err}
+				return
+			}
+
+			resCh <- chunkAccessResult{index: idx, url: cr.URL, header: cr.Header}
+		}(i, c)
+	}
+
+	var firstAccessErr error
+	for range chunks {
+		res := <-resCh
+		if res.err != nil && firstAccessErr == nil {
+			firstAccessErr = res.err
 		}
-		chunkURLs = append(chunkURLs, cr.URL)
-		if headers == nil && len(cr.Header) > 0 {
-			headers = make(map[string]string)
-			for k, vs := range cr.Header {
-				if len(vs) > 0 {
-					headers[k] = vs[0]
+		if res.err == nil {
+			chunkURLs[res.index] = res.url
+			headersMu.Lock()
+			if headers == nil && len(res.header) > 0 {
+				headers = make(map[string]string)
+				for k, vs := range res.header {
+					if len(vs) > 0 {
+						headers[k] = vs[0]
+					}
 				}
 			}
+			headersMu.Unlock()
 		}
+	}
+
+	if firstAccessErr != nil {
+		return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", firstAccessErr)
 	}
 
 	return StreamInfo{
@@ -742,16 +877,10 @@ func fastStartMP4(tmpFile *os.File) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create output temp: %w", err)
 	}
-	data, err := io.ReadAll(f)
-	if err != nil {
+	if _, err := io.Copy(out, f); err != nil {
 		out.Close()
 		os.Remove(out.Name())
-		return nil, fmt.Errorf("read converted data: %w", err)
-	}
-	if _, err := out.Write(data); err != nil {
-		out.Close()
-		os.Remove(out.Name())
-		return nil, fmt.Errorf("write faststarted data: %w", err)
+		return nil, fmt.Errorf("copy faststarted data: %w", err)
 	}
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		out.Close()

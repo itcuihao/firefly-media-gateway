@@ -1605,12 +1605,6 @@ const debugHTML = `<!doctype html>
           </div>
         </div>
 
-        <div class="form-field">
-          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
-            <input type="checkbox" id="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
-            <span>是否会员专享内容 (is_member)</span>
-          </label>
-        </div>
 
         <div class="form-field" style="margin-top: 16px;">
           <label>选择媒体文件</label>
@@ -2128,7 +2122,6 @@ const debugHTML = `<!doctype html>
       form.append('file', fileInput.files[0]);
       form.append('project', document.getElementById('uploadProject').value.trim());
       form.append('usage', document.getElementById('uploadUsage').value);
-      form.append('member', document.getElementById('uploadIsMember').checked ? 'true' : 'false');
 
       showToast('正在上传，请耐心等待...', 'success');
       closeUploadDialog();
@@ -2523,15 +2516,6 @@ const debugHTML = `<!doctype html>
           buildInput('project', '所属项目 (project)', '例如 default-proj', 'text', 'test-project') +
           buildInput('usage', '使用用途 (usage)', '例如 cover / avatar', 'text', 'cover') +
           '<div class="form-field">' +
-            '<label>会员专享 (member)</label>' +
-            '<div class="input-wrapper">' +
-              '<select id="sb_isMember">' +
-                '<option value="false">否 (false)</option>' +
-                <option value="true">是 (true)</option> +
-              '</select>' +
-            '</div>' +
-          '</div>' +
-          '<div class="form-field">' +
             '<label>文件 (file)</label>' +
             '<div class="input-wrapper">' +
               '<input id="sb_file" type="file" />' +
@@ -2593,7 +2577,6 @@ const debugHTML = `<!doctype html>
         } else if (apiType === 'upload') {
           var project = document.getElementById('sb_project').value.trim();
           var usage = document.getElementById('sb_usage').value.trim();
-          var isMember = document.getElementById('sb_isMember').value;
           var fileInput = document.getElementById('sb_file');
 
           if (!fileInput.files || !fileInput.files[0]) {
@@ -2608,7 +2591,6 @@ const debugHTML = `<!doctype html>
           form.append('file', fileInput.files[0]);
           form.append('project', project);
           form.append('usage', usage);
-          form.append('member', isMember);
           options.body = form;
           // Delete Content-Type to let browser set boundary automatically
           delete options.headers['Content-Type'];

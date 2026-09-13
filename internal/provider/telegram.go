@@ -61,36 +61,76 @@ func (p *TelegramProvider) Upload(ctx context.Context, in UploadInput) (UploadRe
 	}
 
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", p.botToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, &body)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("build sendDocument request: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	contentType := mw.FormDataContentType()
+	reqBytes := body.Bytes()
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("call sendDocument: %w", err)
-	}
-	defer resp.Body.Close()
+	const maxRetries = 3
+	var lastErr error
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return UploadResult{}, fmt.Errorf("sendDocument status=%d body=%s", resp.StatusCode, string(b))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return UploadResult{}, ctx.Err()
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(reqBytes))
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("build sendDocument request: %w", err)
+		}
+		req.Header.Set("Content-Type", contentType)
+
+		resp, err := p.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("call sendDocument: %w", err)
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			continue
+		}
+
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			var tgErr sendDocumentResponse
+			_ = json.Unmarshal(b, &tgErr)
+			waitSec := 3
+			if tgErr.Parameters != nil && tgErr.Parameters.RetryAfter > 0 {
+				waitSec = tgErr.Parameters.RetryAfter
+			}
+			lastErr = fmt.Errorf("telegram rate limit (429): retry after %d seconds", waitSec)
+			select {
+			case <-ctx.Done():
+				return UploadResult{}, ctx.Err()
+			case <-time.After(time.Duration(waitSec) * time.Second):
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("sendDocument status=%d body=%s", resp.StatusCode, string(b))
+			if resp.StatusCode >= 500 && attempt < maxRetries {
+				time.Sleep(time.Duration(attempt+1) * 1 * time.Second)
+				continue
+			}
+			return UploadResult{}, lastErr
+		}
+
+		var result sendDocumentResponse
+		if err := json.Unmarshal(b, &result); err != nil {
+			return UploadResult{}, fmt.Errorf("decode sendDocument response: %w", err)
+		}
+		if !result.OK || result.Result.Document.FileID == "" {
+			return UploadResult{}, fmt.Errorf("sendDocument failed: %s", result.Description)
+		}
+
+		chat := p.chatID
+		return UploadResult{
+			ProviderFileID:       result.Result.Document.FileID,
+			ProviderBucketOrChat: &chat,
+		}, nil
 	}
 
-	var result sendDocumentResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return UploadResult{}, fmt.Errorf("decode sendDocument response: %w", err)
-	}
-	if !result.OK || result.Result.Document.FileID == "" {
-		return UploadResult{}, fmt.Errorf("sendDocument failed: %s", result.Description)
-	}
-
-	chat := p.chatID
-	return UploadResult{
-		ProviderFileID:       result.Result.Document.FileID,
-		ProviderBucketOrChat: &chat,
-	}, nil
+	return UploadResult{}, lastErr
 }
 
 func (p *TelegramProvider) Delete(_ context.Context, _ string, _ *string) error {
@@ -136,7 +176,10 @@ func (p *TelegramProvider) GetAccess(ctx context.Context, providerFileID string,
 type sendDocumentResponse struct {
 	OK          bool   `json:"ok"`
 	Description string `json:"description"`
-	Result      struct {
+	Parameters  *struct {
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters,omitempty"`
+	Result struct {
 		Document struct {
 			FileID string `json:"file_id"`
 		} `json:"document"`

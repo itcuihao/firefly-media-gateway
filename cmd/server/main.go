@@ -48,6 +48,7 @@ func main() {
 	}
 
 	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
+	svc.SetUploadConcurrency(cfg.UploadConcurrency)
 	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PublicBaseURL, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), commit, logger)
 
 	// 创建 S3 Gateway（可选）
@@ -65,9 +66,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       cfg.ServerReadTimeout,
+		WriteTimeout:      cfg.ServerWriteTimeout,
 		IdleTimeout:       120 * time.Second,
 	}
 

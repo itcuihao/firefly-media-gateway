@@ -39,7 +39,6 @@ const activeAsset = ref<MediaAsset | null>(null)
 const uploadDialogOpen = ref(false)
 const uploadProject = ref('interactive-video')
 const uploadUsage = ref('cover')
-const uploadIsMember = ref(false)
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFileKind = ref<'image' | 'video' | 'audio' | 'file' | null>(null)
@@ -48,7 +47,7 @@ const dragOver = ref(false)
 
 const sizeLimitHint = computed(() => {
   if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp/gif/svg/avif)'
-  if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov/mkv)'
+  if (selectedFileKind.value === 'video') return '视频最大 2GB (mp4/webm/mov/mkv，超过 15MB 自动分片加速)'
   if (selectedFileKind.value === 'audio') return '音频最大 50MB (mp3/ogg/wav/aac/flac/m4a)'
   if (selectedFileKind.value === 'file') return '文档/压缩包最大 50MB (pdf/doc/docx/xls/xlsx/ppt/pptx/csv/txt/zip/rar/7z)'
   return '支持图片 (最大10MB)、视频 (最大2GB)、音频与文档/压缩包 (最大50MB)'
@@ -302,7 +301,6 @@ async function submitUploadFile() {
   form.append('file', fileToUpload)
   form.append('project', uploadProject.value.trim())
   form.append('usage', uploadUsage.value)
-  form.append('member', uploadIsMember.value ? 'true' : 'false')
 
   showToast('正在上传，请耐心等待...', 'success')
   closeUploadDialog()
@@ -669,11 +667,8 @@ onMounted(() => {
               </label>
             </div>
 
-            <div v-if="selectedFileKind === 'video'" class="form-field">
-              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-                <input type="checkbox" v-model="uploadIsMember" style="accent-color: hsl(var(--md-sys-color-primary));" />
-                <span>启用大文件分片上传 (需要会员身份)</span>
-              </label>
+            <div v-if="selectedFileKind === 'video'" class="form-field" style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); display: flex; align-items: center; gap: 6px;">
+              <span>⚡ 大文件/长视频支持最高 2GB，网关将自动并发分片存储并优化流式播放</span>
             </div>
           </template>
         </div>

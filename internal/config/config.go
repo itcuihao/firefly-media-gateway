@@ -28,16 +28,19 @@ type BotsConfig map[string]BotConfig
 
 type Config struct {
 	// 服务配置
-	ListenAddr     string
-	DatabaseDriver string
-	DatabaseURL    string
-	AuthToken      string
-	PrivateRules   []string
-	PublicBaseURL  string
+	ListenAddr         string
+	DatabaseDriver     string
+	DatabaseURL        string
+	AuthToken          string
+	PrivateRules       []string
+	PublicBaseURL      string
+	ServerReadTimeout  time.Duration
+	ServerWriteTimeout time.Duration
 
 	// 存储模式配置
-	StorageMode     StorageMode
-	ProviderDefault string // provider key, for example "tg", "r2", "discord", "huggingface"
+	StorageMode       StorageMode
+	ProviderDefault   string // provider key, for example "tg", "r2", "discord", "huggingface"
+	UploadConcurrency int    // 分片并发上传数
 
 	// Direct 模式配置（直接对接 Telegram）
 	TelegramBotToken   string
@@ -57,9 +60,12 @@ func Load() (Config, error) {
 		AuthToken:        strings.TrimSpace(os.Getenv("MEDIA_GATEWAY_TOKEN")),
 		PublicBaseURL:    strings.TrimRight(getenv("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 		StorageMode:      StorageMode(strings.ToLower(getenv("STORAGE_MODE", "direct"))),
-		ProviderDefault:  strings.ToLower(getenv("MEDIA_PROVIDER_DEFAULT", "tg")),
-		UploadTimeout:    durationFromEnv("UPLOAD_TIMEOUT_SECONDS", 60),
-		TelegramBotToken: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		ProviderDefault:    strings.ToLower(getenv("MEDIA_PROVIDER_DEFAULT", "tg")),
+		UploadConcurrency:  intFromEnv("UPLOAD_CONCURRENCY", 3),
+		ServerReadTimeout:  durationFromEnv("SERVER_READ_TIMEOUT_SECONDS", 1800),
+		ServerWriteTimeout: durationFromEnv("SERVER_WRITE_TIMEOUT_SECONDS", 1800),
+		UploadTimeout:      durationFromEnv("UPLOAD_TIMEOUT_SECONDS", 60),
+		TelegramBotToken:   strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		TelegramChatID:   strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
 		WorkerBaseURL:    strings.TrimSpace(os.Getenv("WORKER_BASE_URL")),
 		WorkerAuthToken:  strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN")),
@@ -205,4 +211,16 @@ func parseStringSlice(v string) []string {
 		}
 	}
 	return res
+}
+
+func intFromEnv(key string, defaultValue int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultValue
+	}
+	return n
 }

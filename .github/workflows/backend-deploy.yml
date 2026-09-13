@@ -2,9 +2,14 @@ name: Backend CI/CD
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   test:
@@ -25,20 +30,70 @@ jobs:
       - name: Test
         run: go test ./...
 
+  bump-tag:
+    name: Bump Tag
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      tag: ${{ steps.tagger.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate and Push Next Tag
+        id: tagger
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.1.3"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+
+          VERSION_WITHOUT_V="${LATEST_TAG#v}"
+          MAJOR=$(echo "$VERSION_WITHOUT_V" | cut -d. -f1)
+          MINOR=$(echo "$VERSION_WITHOUT_V" | cut -d. -f2)
+          PATCH=$(echo "$VERSION_WITHOUT_V" | cut -d. -f3)
+
+          # If commit message contains feat:, bump minor; else bump patch
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if echo "$COMMIT_MSG" | grep -qiE "(^feat(\(.*\))?:|feat:)"; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Generated next tag: $NEW_TAG"
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+          git tag -a "$NEW_TAG" -m "$COMMIT_MSG"
+          git push origin "$NEW_TAG"
+
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [test, bump-tag]
+    if: always() && (needs.test.result == 'success') && (needs.bump-tag.result == 'success' || needs.bump-tag.result == 'skipped')
     steps:
-      - name: Extract tag name
-        id: tag
+      - name: Determine Deploy Tag
+        id: resolve_tag
         run: |
-          REF_NAME="${GITHUB_REF#refs/tags/}"
-          REF_NAME="${REF_NAME#refs/heads/}"
-          # Replace slashes with dashes to ensure a valid Docker tag name
-          TAG_NAME=$(echo "$REF_NAME" | sed 's/\//-/g')
-          echo "TAG=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ needs.bump-tag.outputs.tag }}" ]; then
+            DEPLOY_TAG="${{ needs.bump-tag.outputs.tag }}"
+          else
+            REF_NAME="${GITHUB_REF#refs/tags/}"
+            REF_NAME="${REF_NAME#refs/heads/}"
+            DEPLOY_TAG=$(echo "$REF_NAME" | sed 's/\//-/g')
+          fi
+          echo "Deploying version: $DEPLOY_TAG"
+          echo "TAG=$DEPLOY_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
@@ -51,10 +106,10 @@ jobs:
             cd /opt/firefly-media-gateway
             git reset --hard
             git fetch --all --tags -f
-            git checkout ${{ steps.tag.outputs.TAG }}
+            git checkout ${{ steps.resolve_tag.outputs.TAG }}
             # If it's a branch, pull the latest changes; if it's a tag, git pull might do nothing but checkout is sufficient.
             git pull || true
-            docker build --build-arg VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -t firefly-media-gateway:${{ steps.tag.outputs.TAG }} -t firefly-media-gateway:latest .
+            docker build --build-arg VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -t firefly-media-gateway:${{ steps.resolve_tag.outputs.TAG }} -t firefly-media-gateway:latest .
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
             sleep 5

@@ -12,7 +12,6 @@ const sbOffset = ref('0')
 const sbMediaId = ref('')
 const sbProject = ref('test-project')
 const sbUsage = ref('cover')
-const sbIsMember = ref('false')
 const sbToken = ref('')
 const sbAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -278,7 +277,6 @@ const generatedCurl = computed(() => {
     multipartParts.push({ key: 'file', value: `@${fileName}`, isFile: true })
     multipartParts.push({ key: 'project', value: sbProject.value.trim() })
     multipartParts.push({ key: 'usage', value: sbUsage.value.trim() })
-    multipartParts.push({ key: 'member', value: sbIsMember.value })
   }
 
   // Constructing the curl command string
@@ -371,7 +369,6 @@ async function runSandboxApi() {
     } else if (selectedApi.value === 'upload') {
       const project = sbProject.value.trim()
       const usage = sbUsage.value.trim()
-      const isMember = sbIsMember.value
       const fileInput = fileInputRef.value
 
       if (!fileInput || !fileInput.files || !fileInput.files[0]) {
@@ -406,7 +403,6 @@ async function runSandboxApi() {
       form.append('file', fileToUpload)
       form.append('project', project)
       form.append('usage', usage)
-      form.append('member', isMember)
 
       options = {
         method: 'POST',
@@ -547,15 +543,6 @@ async function runSandboxApi() {
               <label>使用用途 (usage)</label>
               <div class="input-wrapper">
                 <input v-model="sbUsage" type="text" placeholder="例如 cover / avatar" />
-              </div>
-            </div>
-            <div class="form-field">
-              <label>会员专享 (member)</label>
-              <div class="input-wrapper">
-                <select v-model="sbIsMember">
-                  <option value="false">否 (false)</option>
-                  <option value="true">是 (true)</option>
-                </select>
               </div>
             </div>
             <div class="form-field">

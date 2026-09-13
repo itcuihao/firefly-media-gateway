@@ -259,6 +259,80 @@ func TestUploadDeduplication(t *testing.T) {
 	}
 }
 
+type dummyFixedReader struct {
+	remaining int64
+}
+
+func (r *dummyFixedReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	for i := 0; i < n; i++ {
+		p[i] = byte(i % 256)
+	}
+	r.remaining -= int64(n)
+	return n, nil
+}
+
+func TestUploadAutoChunkingWithoutMember(t *testing.T) {
+	repo := &fakeRepository{}
+	p := &fakeProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	// 16MB video (exceeds 15MB chunkSize)
+	reader := &dummyFixedReader{remaining: 16 * 1024 * 1024}
+	result, err := svc.Upload(context.Background(), UploadRequest{
+		Project:             "proj",
+		Usage:               "scene",
+		FileName:            "test.mov",
+		DeclaredContentType: "video/quicktime",
+		Reader:              reader,
+		// Notice: IsMember is false (default)
+	})
+	if err != nil {
+		t.Fatalf("unexpected upload error: %v", err)
+	}
+
+	if !result.IsChunked {
+		t.Fatalf("expected video > 15MB to be auto-chunked without member flag")
+	}
+
+	chunks, err := repo.GetChunks(context.Background(), result.ID)
+	if err != nil {
+		t.Fatalf("get chunks: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks for 16MB file with 15MB chunkSize, got %d", len(chunks))
+	}
+}
+
+func TestUploadSingleUnderChunkSize(t *testing.T) {
+	repo := &fakeRepository{}
+	p := &fakeProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	// 2MB video (under 15MB chunkSize)
+	reader := &dummyFixedReader{remaining: 2 * 1024 * 1024}
+	result, err := svc.Upload(context.Background(), UploadRequest{
+		Project:             "proj",
+		Usage:               "scene",
+		FileName:            "short.mov",
+		DeclaredContentType: "video/quicktime",
+		Reader:              reader,
+	})
+	if err != nil {
+		t.Fatalf("unexpected upload error: %v", err)
+	}
+
+	if result.IsChunked {
+		t.Fatalf("expected video <= 15MB to be single upload, got chunked")
+	}
+}
+
 func TestDeleteDeduplication(t *testing.T) {
 	location := "bucket-a"
 	sha := "hash123"

@@ -37,10 +37,12 @@ A self-hosted media storage gateway that uses Telegram as unlimited storage back
 - `DELETE /s3/{bucket}?asset_id=xxx` — 删除
 - `GET    /s3/{bucket}` — 列举
 
-## 上传限制
+## 上传限制与流式分片
 
-- 图片：`jpg/jpeg/png/webp`，最大 `10MB`
-- 视频：`mp4/webm/mov`，最大 `120MB`
+- 图片：`jpg/jpeg/png/webp/gif/svg/avif`，最大 `10MB`
+- 视频：`mp4/webm/mov/mkv`，最大 `2GB`（超过 15MB 自动并发分片存储至 Telegram，透明支持 HTTP Range 拖拽点播）
+- 音频：`mp3/ogg/wav/aac/flac/m4a`，最大 `50MB`
+- 文档与归档：`pdf/doc/docx/xls/xlsx/ppt/pptx/csv/txt/zip/rar/7z`，最大 `500MB`
 
 ## 鉴权
 
@@ -50,7 +52,7 @@ A self-hosted media storage gateway that uses Telegram as unlimited storage back
 Authorization: Bearer <MEDIA_GATEWAY_TOKEN>
 ```
 
-`GET /api/v1/media/{mediaId}` 与 `GET /api/v1/media/{mediaId}/stream` 均返回媒体二进制内容，需要鉴权。`/stream` 会代理底层 provider 的文件流；单文件支持透传 `Range` 请求，分片文件暂不支持 Range。
+`GET /api/v1/media/{mediaId}` 与 `GET /api/v1/media/{mediaId}/stream` 均返回媒体二进制内容，需要鉴权。`/stream` 会代理底层 provider 的文件流，单文件与分片大文件均支持透传 `Range` 请求。
 
 ## 数据库
 
