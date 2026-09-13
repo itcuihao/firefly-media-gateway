@@ -365,11 +365,21 @@ PUBLIC_BASE_URL=https://your-domain.com
 | `DEPLOY_SSH_KEY` | SSH 私钥 |
 | `DEPLOY_PORT` | SSH 端口（可选，默认 22） |
 
-#### 3. 触发部署
+#### 3. CI/CD 与自动化版本 Tag 规范
+
+代码合并推送到 `main` 分支时，GitHub Actions 会根据最近一次提交的 **Commit Message 前缀（约定式提交）** 自动计算并生成语义化 Tag，随后自动部署：
+
+| Commit 前缀 | 含义 | 对应版本递增 | 示例 |
+| :--- | :--- | :--- | :--- |
+| **`fix:`** / **`perf:`** / **`refactor:`** / **`chore:`** / 其他 | 日常修复与调优 | **Patch +1**（修订号） | `v0.2.0` ➔ `v0.2.1` |
+| **`feat:`** / **`feat(模块):`** | 新增业务功能特性 | **Minor +1**（次版本号） | `v0.2.0` ➔ `v0.3.0` |
+| **`feat!:`** / **`fix!:`** / 正文含 `BREAKING CHANGE:` | 破坏性大版本重构 | **Major +1**（主版本号） | `v0.2.0` ➔ `v1.0.0` |
+
+也可手动打 Tag 推送触发部署：
 
 ```bash
 git tag v1.0.0
-git push --tags
+git push github v1.0.0
 ```
 
 也可在 GitHub Actions 页面手动触发（`workflow_dispatch`）。

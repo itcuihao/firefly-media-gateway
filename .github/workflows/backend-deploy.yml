@@ -60,9 +60,16 @@ jobs:
           MINOR=$(echo "$VERSION_WITHOUT_V" | cut -d. -f2)
           PATCH=$(echo "$VERSION_WITHOUT_V" | cut -d. -f3)
 
-          # If commit message contains feat:, bump minor; else bump patch
+          # Conventional Commits SemVer resolution:
+          # 1. Major bump: feat!:, fix!:, any!:, or BREAKING CHANGE: / BREAKING-CHANGE:
+          # 2. Minor bump: feat: or feat(scope):
+          # 3. Patch bump: fix:, perf:, refactor:, chore:, docs:, or any other commit
           COMMIT_MSG=$(git log -1 --pretty=%B)
-          if echo "$COMMIT_MSG" | grep -qiE "(^feat(\(.*\))?:|feat:)"; then
+          if echo "$COMMIT_MSG" | grep -qiE "(^[a-z]+(\(.*\))?!:|BREAKING[ -]CHANGE:)"; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif echo "$COMMIT_MSG" | grep -qiE "(^feat(\(.*\))?:|feat:)"; then
             MINOR=$((MINOR + 1))
             PATCH=0
           else
@@ -102,6 +109,8 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
+          timeout: 60s
+          command_timeout: 15m
           script: |
             cd /opt/firefly-media-gateway
             git reset --hard
