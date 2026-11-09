@@ -50,6 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_status ON media_assets(status);
 CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(project);
 CREATE INDEX IF NOT EXISTS idx_media_assets_created_at ON media_assets(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_media_assets_is_chunked ON media_assets(is_chunked);
+CREATE INDEX IF NOT EXISTS idx_media_assets_sha256 ON media_assets(sha256);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("ensure sqlite schema: %w", err)
@@ -390,11 +391,28 @@ func (r *SQLiteRepository) GetDistinctUsages(ctx context.Context, onlyPublic boo
 }
 
 func (r *SQLiteRepository) SaveChunks(ctx context.Context, assetID string, chunks []media.Chunk) error {
-	const q = `INSERT INTO media_chunks (asset_id, chunk_index, chunk_file_id) VALUES (?, ?, ?)`
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save chunks tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO media_chunks (asset_id, chunk_index, chunk_file_id) VALUES (?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare save chunks stmt: %w", err)
+	}
+	defer stmt.Close()
+
 	for _, c := range chunks {
-		if _, err := r.db.ExecContext(ctx, q, assetID, c.ChunkIndex, c.ChunkFileID); err != nil {
+		if _, err := stmt.ExecContext(ctx, assetID, c.ChunkIndex, c.ChunkFileID); err != nil {
 			return fmt.Errorf("save chunk %d: %w", c.ChunkIndex, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save chunks tx: %w", err)
 	}
 	return nil
 }

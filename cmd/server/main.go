@@ -32,6 +32,14 @@ var commit = "unknown"
 func main() {
 	logger := log.New(os.Stdout, "[media-gateway] ", log.LstdFlags|log.Lmicroseconds)
 
+	// Tune default HTTP transport connection pool for high-concurrency streaming & chunk uploads
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr.MaxIdleConns = 200
+		tr.MaxIdleConnsPerHost = 50
+		tr.IdleConnTimeout = 90 * time.Second
+		tr.ForceAttemptHTTP2 = true
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Fatalf("load config: %v", err)
@@ -127,6 +135,8 @@ func openRepository(ctx context.Context, cfg config.Config) (*sql.DB, media.Repo
 			db.Close()
 			return nil, nil, fmt.Errorf("sqlite not ready: %w", err)
 		}
+		// Enable WAL mode and busy_timeout for better concurrent read/write performance
+		_, _ = db.ExecContext(ctx, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")
 		if err := storage.EnsureSQLiteSchema(ctx, db); err != nil {
 			db.Close()
 			return nil, nil, err

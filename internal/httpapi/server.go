@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"firefly-media-gateway/internal/media"
@@ -30,6 +31,13 @@ import (
 )
 
 const maxRequestBodyBytes int64 = 2005 * 1024 * 1024 // 2GB + 5MB buffer
+
+var streamCopyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 256*1024)
+		return &buf
+	},
+}
 
 type Server struct {
 	svc              *media.Service
@@ -45,6 +53,7 @@ type Server struct {
 	logger           *log.Logger
 	sf               singleflight.Group
 	diskCache        *DiskCache
+	workerProviders  sync.Map
 }
 
 func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode, commit string, logger *log.Logger) *Server {
@@ -100,6 +109,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/admin/", http.StripPrefix("/admin", s.frontendHandler()))
 
 	mux.HandleFunc("POST /api/v1/media/upload", s.withAuth(s.handleUpload))
+	mux.HandleFunc("POST /api/v1/media/upload/init", s.withAuth(s.handleUploadInit))
+	mux.HandleFunc("POST /api/v1/media/upload/{uploadId}/chunk", s.withAuth(s.handleUploadChunk))
+	mux.HandleFunc("POST /api/v1/media/upload/{uploadId}/complete", s.withAuth(s.handleUploadComplete))
 	mux.HandleFunc("GET /api/v1/media", s.handleListMedia)
 	mux.HandleFunc("GET /api/v1/media/projects", s.handleGetProjects)
 	mux.HandleFunc("GET /api/v1/media/usages", s.handleGetUsages)
@@ -155,37 +167,214 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
-			s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", err)
-			return
-		}
+	mr, err := r.MultipartReader()
+	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "invalid multipart form", err)
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "file is required", err)
-		return
-	}
-	defer file.Close()
-
-	project := strings.TrimSpace(r.FormValue("project"))
-	usage := strings.TrimSpace(r.FormValue("usage"))
-	isMember := r.FormValue("member") == "true" || r.FormValue("is_member") == "true"
+	var (
+		project             string
+		usage               string
+		isMember            bool
+		fileName            string
+		declaredContentType string
+		bufferedTmpFile     *os.File
+	)
+	defer func() {
+		if bufferedTmpFile != nil {
+			_ = bufferedTmpFile.Close()
+			_ = os.Remove(bufferedTmpFile.Name())
+		}
+	}()
 
 	overrideProvider := s.resolveWorkerProvider(r)
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+				s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", err)
+				return
+			}
+			s.writeError(w, r, http.StatusBadRequest, "invalid multipart form", err)
+			return
+		}
+
+		formName := part.FormName()
+		switch formName {
+		case "project":
+			b, _ := io.ReadAll(io.LimitReader(part, 4096))
+			project = strings.TrimSpace(string(b))
+			_ = part.Close()
+		case "usage":
+			b, _ := io.ReadAll(io.LimitReader(part, 4096))
+			usage = strings.TrimSpace(string(b))
+			_ = part.Close()
+		case "member", "is_member":
+			b, _ := io.ReadAll(io.LimitReader(part, 256))
+			if strings.TrimSpace(string(b)) == "true" {
+				isMember = true
+			}
+			_ = part.Close()
+		case "file":
+			fileName = part.FileName()
+			declaredContentType = part.Header.Get("Content-Type")
+
+			// Fast path: if project & usage were already parsed before the file part,
+			// stream `part` directly into Service.Upload without an extra temporary file!
+			if project != "" && usage != "" {
+				asset, upErr := s.svc.Upload(r.Context(), media.UploadRequest{
+					Project:             project,
+					Usage:               usage,
+					FileName:            fileName,
+					DeclaredContentType: declaredContentType,
+					Reader:              part,
+					IsMember:            isMember,
+					OverrideProvider:    overrideProvider,
+				})
+				_ = part.Close()
+				if upErr != nil {
+					if strings.Contains(strings.ToLower(upErr.Error()), "request body too large") {
+						s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", upErr)
+						return
+					}
+					s.writeDomainError(w, r, upErr)
+					return
+				}
+				writeJSON(w, http.StatusCreated, s.signAssetURL(asset))
+				return
+			}
+
+			// Fallback when `file` field appears before `project`/`usage` in multipart form
+			tmp, tmpErr := os.CreateTemp("", "http-multipart-*")
+			if tmpErr != nil {
+				_ = part.Close()
+				s.writeError(w, r, http.StatusInternalServerError, "failed to create temp file", tmpErr)
+				return
+			}
+			bufferedTmpFile = tmp
+			bufPtr := streamCopyBufPool.Get().(*[]byte)
+			_, copyErr := io.CopyBuffer(tmp, part, *bufPtr)
+			streamCopyBufPool.Put(bufPtr)
+			_ = part.Close()
+			if copyErr != nil {
+				if strings.Contains(strings.ToLower(copyErr.Error()), "request body too large") {
+					s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", copyErr)
+					return
+				}
+				s.writeError(w, r, http.StatusBadRequest, "invalid multipart stream", copyErr)
+				return
+			}
+		default:
+			_ = part.Close()
+		}
+	}
+
+	if bufferedTmpFile == nil || fileName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "file is required", nil)
+		return
+	}
+	if _, err := bufferedTmpFile.Seek(0, io.SeekStart); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "rewind temp file failed", err)
+		return
+	}
 
 	asset, err := s.svc.Upload(r.Context(), media.UploadRequest{
 		Project:             project,
 		Usage:               usage,
-		FileName:            header.Filename,
-		DeclaredContentType: header.Header.Get("Content-Type"),
-		Reader:              file,
+		FileName:            fileName,
+		DeclaredContentType: declaredContentType,
+		Reader:              bufferedTmpFile,
 		IsMember:            isMember,
 		OverrideProvider:    overrideProvider,
 	})
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, s.signAssetURL(asset))
+}
+
+func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Project   string `json:"project"`
+		Usage     string `json:"usage"`
+		FileName  string `json:"fileName"`
+		MIMEType  string `json:"mimeType"`
+		SizeBytes int64  `json:"sizeBytes"`
+		SHA256    string `json:"sha256"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	overrideProvider := s.resolveWorkerProvider(r)
+	out, err := s.svc.InitChunkedUpload(r.Context(), media.InitUploadInput{
+		Project:          body.Project,
+		Usage:            body.Usage,
+		FileName:         body.FileName,
+		DeclaredMIMEType: body.MIMEType,
+		SizeBytes:        body.SizeBytes,
+		SHA256:           body.SHA256,
+		OverrideProvider: overrideProvider,
+	})
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+	if out.Duplicated && out.Asset != nil {
+		signed := s.signAssetURL(*out.Asset)
+		out.Asset = &signed
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request) {
+	uploadID := strings.TrimSpace(r.PathValue("uploadId"))
+	if uploadID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "uploadId is required", nil)
+		return
+	}
+	idxStr := strings.TrimSpace(r.URL.Query().Get("index"))
+	chunkIndex, err := strconv.Atoi(idxStr)
+	if err != nil || chunkIndex < 0 {
+		s.writeError(w, r, http.StatusBadRequest, "valid chunk index query parameter is required", err)
+		return
+	}
+
+	// Limit single chunk request to 20MB
+	r.Body = http.MaxBytesReader(w, r.Body, 20*1024*1024)
+	defer r.Body.Close()
+
+	received, total, err := s.svc.WriteUploadChunk(r.Context(), uploadID, chunkIndex, r.Body)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uploadId":    uploadID,
+		"chunkIndex":  chunkIndex,
+		"received":    received,
+		"totalChunks": total,
+	})
+}
+
+func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
+	uploadID := strings.TrimSpace(r.PathValue("uploadId"))
+	if uploadID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "uploadId is required", nil)
+		return
+	}
+
+	overrideProvider := s.resolveWorkerProvider(r)
+	asset, err := s.svc.CompleteChunkedUpload(r.Context(), uploadID, overrideProvider)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
@@ -256,7 +445,11 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 	if ext != "" {
 		filename += ext
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+	disposition := "inline"
+	if dl := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("download"))); dl == "1" || dl == "true" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, filename))
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	isPublic := s.isAssetPublic(asset)
@@ -272,7 +465,7 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		etag = fmt.Sprintf("%q", *asset.SHA256)
 	}
 
-	willServeWebP := !streamInfo.IsChunked && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r)
+	willServeWebP := disposition == "inline" && !streamInfo.IsChunked && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r)
 	if willServeWebP {
 		etag = fmt.Sprintf("%q", "webp-"+asset.ID)
 	}
@@ -305,7 +498,7 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r) {
+	if disposition == "inline" && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r) {
 		if s.tryServeWebPCache(w, r, mediaID, streamInfo, cacheControl) {
 			return
 		}
@@ -488,7 +681,9 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	w.Header().Set("Cache-Control", cacheControl)
 
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	bufPtr := streamCopyBufPool.Get().(*[]byte)
+	defer streamCopyBufPool.Put(bufPtr)
+	if _, err := io.CopyBuffer(w, resp.Body, *bufPtr); err != nil {
 		s.logger.Printf("[WARN]  stream media failed: %v", err)
 	}
 }
@@ -536,7 +731,27 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		w.WriteHeader(http.StatusOK)
 	}
 
-	for i, chunkURL := range streamInfo.ChunkURLs {
+	chunkCount := streamInfo.ChunkCount
+	if chunkCount == 0 {
+		chunkCount = len(streamInfo.ChunkURLs)
+	}
+	if chunkCount <= 0 {
+		return
+	}
+
+	firstChunk := int(start / chunkSize)
+	if firstChunk < 0 {
+		firstChunk = 0
+	}
+	lastChunk := int(end / chunkSize)
+	if lastChunk >= chunkCount {
+		lastChunk = chunkCount - 1
+	}
+
+	bufPtr := streamCopyBufPool.Get().(*[]byte)
+	defer streamCopyBufPool.Put(bufPtr)
+
+	for i := firstChunk; i <= lastChunk; i++ {
 		chunkStart := int64(i) * chunkSize
 		chunkEnd := chunkStart + chunkSize - 1
 		if chunkEnd >= streamInfo.TotalBytes {
@@ -547,6 +762,31 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		// Check if this chunk overlaps with the requested range
 		if start > chunkEnd || end < chunkStart {
 			continue
+		}
+
+		// Lookahead prefetch: resolve next chunk's access URL in background while streaming current chunk
+		if i+1 <= lastChunk && streamInfo.ResolveChunk != nil {
+			go func(nextIdx int) {
+				_, _, _ = streamInfo.ResolveChunk(r.Context(), nextIdx)
+			}(i + 1)
+		}
+
+		var chunkURL string
+		var chunkHeaders map[string]string
+		if streamInfo.ResolveChunk != nil {
+			var resolveErr error
+			chunkURL, chunkHeaders, resolveErr = streamInfo.ResolveChunk(r.Context(), i)
+			if resolveErr != nil {
+				s.logger.Printf("[WARN]  resolve chunk %d URL failed: %v", i, resolveErr)
+				return
+			}
+		} else if i < len(streamInfo.ChunkURLs) {
+			chunkURL = streamInfo.ChunkURLs[i]
+			chunkHeaders = streamInfo.Headers
+		}
+
+		if len(chunkHeaders) == 0 {
+			chunkHeaders = streamInfo.Headers
 		}
 
 		// Calculate relative start/end within this chunk
@@ -563,14 +803,14 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		var chunkPath string
 		var err error
 		if s.diskCache != nil {
-			chunkPath, err = s.diskCache.GetOrFetchChunk(r.Context(), chunkKey, chunkSizeBytes, chunkURL, streamInfo.Headers)
+			chunkPath, err = s.diskCache.GetOrFetchChunk(r.Context(), chunkKey, chunkSizeBytes, chunkURL, chunkHeaders)
 		} else {
 			err = errors.New("disk cache disabled")
 		}
 
 		if err != nil {
 			s.logger.Printf("[WARN] disk cache miss/fetch failed for chunk %d: %v, falling back to direct stream", i, err)
-			if !s.streamChunkDirect(w, r, chunkURL, streamInfo.Headers, relativeStart, relativeEnd, isRange) {
+			if !s.streamChunkDirect(w, r, chunkURL, chunkHeaders, relativeStart, relativeEnd, isRange) {
 				return
 			}
 			continue
@@ -579,7 +819,7 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		f, err := os.Open(chunkPath)
 		if err != nil {
 			s.logger.Printf("[WARN] open cached chunk %d failed: %v, falling back to direct stream", i, err)
-			if !s.streamChunkDirect(w, r, chunkURL, streamInfo.Headers, relativeStart, relativeEnd, isRange) {
+			if !s.streamChunkDirect(w, r, chunkURL, chunkHeaders, relativeStart, relativeEnd, isRange) {
 				return
 			}
 			continue
@@ -592,7 +832,7 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		}
 
 		neededBytes := relativeEnd - relativeStart + 1
-		_, copyErr := io.CopyN(w, f, neededBytes)
+		_, copyErr := io.CopyBuffer(w, io.LimitReader(f, neededBytes), *bufPtr)
 		f.Close()
 		if copyErr != nil {
 			s.logger.Printf("[WARN] write chunk %d failed: %v", i, copyErr)
@@ -636,7 +876,9 @@ func (s *Server) streamChunkDirect(w http.ResponseWriter, r *http.Request, chunk
 		bodyReader = io.LimitReader(resp.Body, neededBytes)
 	}
 
-	if _, copyErr := io.Copy(w, bodyReader); copyErr != nil {
+	bufPtr := streamCopyBufPool.Get().(*[]byte)
+	defer streamCopyBufPool.Put(bufPtr)
+	if _, copyErr := io.CopyBuffer(w, bodyReader, *bufPtr); copyErr != nil {
 		s.logger.Printf("[WARN] write chunk failed: %v", copyErr)
 		return false
 	}
@@ -1178,12 +1420,24 @@ func extByMIME(mimeType string) string {
 		return ".png"
 	case "image/webp":
 		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
+	case "image/avif":
+		return ".avif"
+	case "image/heic":
+		return ".heic"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return ".ico"
 	case "video/mp4":
 		return ".mp4"
 	case "video/webm":
 		return ".webm"
 	case "video/quicktime":
 		return ".mov"
+	case "video/x-matroska":
+		return ".mkv"
 	case "audio/mpeg":
 		return ".mp3"
 	case "audio/ogg":
@@ -1196,6 +1450,38 @@ func extByMIME(mimeType string) string {
 		return ".flac"
 	case "audio/mp4":
 		return ".m4a"
+	case "application/pdf":
+		return ".pdf"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return ".docx"
+	case "application/msword":
+		return ".doc"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return ".xlsx"
+	case "application/vnd.ms-excel":
+		return ".xls"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return ".pptx"
+	case "application/vnd.ms-powerpoint":
+		return ".ppt"
+	case "text/csv":
+		return ".csv"
+	case "text/plain":
+		return ".txt"
+	case "application/zip":
+		return ".zip"
+	case "application/x-rar-compressed":
+		return ".rar"
+	case "application/x-7z-compressed":
+		return ".7z"
+	case "application/x-tar":
+		return ".tar"
+	case "application/gzip":
+		return ".gz"
+	case "application/json":
+		return ".json"
+	case "text/yaml", "application/x-yaml":
+		return ".yaml"
 	default:
 		return ""
 	}
@@ -1216,15 +1502,21 @@ func (s *Server) resolveWorkerProvider(r *http.Request) provider.StorageProvider
 	if wURL == "" {
 		return nil
 	}
-	
+
 	// Sanitize URL and prepends https:// if missing
 	wURL = strings.TrimSpace(wURL)
 	if !strings.HasPrefix(wURL, "http://") && !strings.HasPrefix(wURL, "https://") {
 		wURL = "https://" + wURL
 	}
 	wURL = strings.TrimRight(wURL, "/")
-	
-	return provider.NewWorkerProvider(wURL, wToken)
+
+	cacheKey := wURL + "|" + wToken
+	if cached, ok := s.workerProviders.Load(cacheKey); ok {
+		return cached.(provider.StorageProvider)
+	}
+	wp := provider.NewWorkerProvider(wURL, wToken)
+	actual, _ := s.workerProviders.LoadOrStore(cacheKey, wp)
+	return actual.(provider.StorageProvider)
 }
 
 func cleanMediaID(rawID string) string {
@@ -1232,7 +1524,11 @@ func cleanMediaID(rawID string) string {
 	if idx := strings.LastIndex(rawID, "."); idx != -1 {
 		ext := strings.ToLower(rawID[idx:])
 		switch ext {
-		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".mp4", ".webm", ".mov", ".ogg", ".mp3", ".wav":
+		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif", ".heic", ".ico",
+			".mp4", ".webm", ".mov", ".mkv",
+			".ogg", ".mp3", ".wav", ".aac", ".flac", ".m4a",
+			".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".txt",
+			".zip", ".rar", ".7z", ".tar", ".gz", ".json", ".yaml", ".yml":
 			return rawID[:idx]
 		}
 	}

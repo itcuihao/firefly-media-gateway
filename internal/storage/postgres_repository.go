@@ -375,11 +375,23 @@ func (r *PostgresRepository) GetDistinctUsages(ctx context.Context, onlyPublic b
 }
 
 func (r *PostgresRepository) SaveChunks(ctx context.Context, assetID string, chunks []media.Chunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save chunks tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	const q = `INSERT INTO media_chunks (asset_id, chunk_index, chunk_file_id) VALUES ($1, $2, $3)`
 	for _, c := range chunks {
-		if _, err := r.db.ExecContext(ctx, q, assetID, c.ChunkIndex, c.ChunkFileID); err != nil {
+		if _, err := tx.ExecContext(ctx, q, assetID, c.ChunkIndex, c.ChunkFileID); err != nil {
 			return fmt.Errorf("save chunk %d: %w", c.ChunkIndex, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save chunks tx: %w", err)
 	}
 	return nil
 }

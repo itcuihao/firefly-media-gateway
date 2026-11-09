@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject } from 'vue'
-import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
-import type { MediaAsset } from '../api'
+import { apiRequest, openMediaAsset, copyToClipboard, uploadMediaWithProgress, buildDownloadUrl, extByMIME } from '../api'
+import type { MediaAsset, UploadProgressInfo } from '../api'
 import FireflySelect from './FireflySelect.vue'
 
 const props = defineProps({
@@ -90,7 +90,18 @@ const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFileKind = ref<'image' | 'video' | 'audio' | 'file' | null>(null)
 const selectedFileName = ref('')
+const selectedFileSize = ref(0)
 const dragOver = ref(false)
+const uploading = ref(false)
+const uploadProgress = ref<UploadProgressInfo | null>(null)
+const uploadAbortController = ref<AbortController | null>(null)
+const hoveredVideoIds = ref<Record<string, boolean>>({})
+
+function markVideoHovered(mediaId: string) {
+  if (!hoveredVideoIds.value[mediaId]) {
+    hoveredVideoIds.value[mediaId] = true
+  }
+}
 
 const uploadUsageOptions = computed(() => {
   if (selectedFileKind.value === 'image') {
@@ -126,27 +137,34 @@ const sizeLimitHint = computed(() => {
   return '支持图片 (最大10MB)、视频 (最大2GB)、音频与文档/压缩包 (最大50MB)'
 })
 
-function onFileSelected() {
-  const file = fileInputRef.value?.files?.[0]
-  if (!file) {
-    selectedFileKind.value = null
-    selectedFileName.value = ''
-    return
-  }
+function detectFileKind(file: File) {
   selectedFileName.value = file.name
-  const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
-  if (file.type.startsWith('image/')) {
+  selectedFileSize.value = file.size
+  const dotIdx = file.name.lastIndexOf('.')
+  const ext = dotIdx !== -1 ? file.name.substring(dotIdx).toLowerCase() : ''
+  if (file.type.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.avif', '.heic', '.ico'].includes(ext)) {
     selectedFileKind.value = 'image'
-  } else if (file.type.startsWith('video/')) {
+  } else if (file.type.startsWith('video/') || ['.mp4', '.webm', '.mov', '.mkv'].includes(ext)) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
-  } else if (file.type.startsWith('audio/') || ext === '.mp3' || ext === '.wav' || ext === '.flac' || ext === '.ogg' || ext === '.aac' || ext === '.m4a') {
+  } else if (file.type.startsWith('audio/') || ['.mp3', '.wav', '.flac', '.ogg', '.aac', '.m4a'].includes(ext)) {
     selectedFileKind.value = 'audio'
     uploadUsage.value = 'audio'
   } else {
     selectedFileKind.value = 'file'
     uploadUsage.value = 'file'
   }
+}
+
+function onFileSelected() {
+  const file = fileInputRef.value?.files?.[0]
+  if (!file) {
+    selectedFileKind.value = null
+    selectedFileName.value = ''
+    selectedFileSize.value = 0
+    return
+  }
+  detectFileKind(file)
 }
 
 function applyFile(file: File) {
@@ -155,33 +173,22 @@ function applyFile(file: File) {
   if (fileInputRef.value) {
     fileInputRef.value.files = dt.files
   }
-  selectedFileName.value = file.name
-  const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
-  if (file.type.startsWith('image/')) {
-    selectedFileKind.value = 'image'
-  } else if (file.type.startsWith('video/')) {
-    selectedFileKind.value = 'video'
-    uploadUsage.value = 'scene'
-  } else if (file.type.startsWith('audio/') || ext === '.mp3' || ext === '.wav' || ext === '.flac' || ext === '.ogg' || ext === '.aac' || ext === '.m4a') {
-    selectedFileKind.value = 'audio'
-    uploadUsage.value = 'audio'
-  } else {
-    selectedFileKind.value = 'file'
-    uploadUsage.value = 'file'
-  }
+  detectFileKind(file)
 }
 
 function onDrop(e: DragEvent) {
   dragOver.value = false
   const file = e.dataTransfer?.files?.[0]
-  if (file && (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/'))) {
+  if (file) {
     applyFile(file)
   }
 }
 
 function clearSelectedFile() {
+  if (uploading.value) return
   selectedFileKind.value = null
   selectedFileName.value = ''
+  selectedFileSize.value = 0
   if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -295,10 +302,26 @@ function openUploadDialog() {
   uploadDialogOpen.value = true
 }
 
+function cancelActiveUpload() {
+  if (uploadAbortController.value) {
+    uploadAbortController.value.abort()
+    uploadAbortController.value = null
+  }
+}
+
 function closeUploadDialog() {
+  if (uploading.value) {
+    if (!confirm('文件正在上传中，关闭窗口将取消当前上传任务，是否确认取消？')) {
+      return
+    }
+    cancelActiveUpload()
+  }
   uploadDialogOpen.value = false
   selectedFileKind.value = null
   selectedFileName.value = ''
+  selectedFileSize.value = 0
+  uploadProgress.value = null
+  uploading.value = false
   dragOver.value = false
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
@@ -348,6 +371,7 @@ function convertImageToWebp(file: File, quality = 0.85): Promise<Blob> {
 }
 
 async function submitUploadFile() {
+  if (uploading.value) return
   const fileInput = fileInputRef.value
   if (!fileInput || !fileInput.files || !fileInput.files[0]) {
     showToast('请选择需要上传的文件！', 'error')
@@ -357,8 +381,18 @@ async function submitUploadFile() {
   let fileToUpload = fileInput.files[0]
   const isJpgOrPng = fileToUpload.type === 'image/jpeg' || fileToUpload.type === 'image/png'
 
+  uploading.value = true
+  const abortController = new AbortController()
+  uploadAbortController.value = abortController
+
   if (isJpgOrPng && uploadAutoWebp.value) {
-    showToast('正在本地优化压缩并转换为 WebP 格式...', 'success')
+    uploadProgress.value = {
+      percent: 1,
+      loadedBytes: 0,
+      totalBytes: fileToUpload.size,
+      speedBps: 0,
+      stage: '正在本地压缩并转换为 WebP 格式...',
+    }
     try {
       const webpBlob = await convertImageToWebp(fileToUpload)
       let newName = fileToUpload.name
@@ -374,24 +408,32 @@ async function submitUploadFile() {
     }
   }
 
-  const form = new FormData()
-  form.append('file', fileToUpload)
-  form.append('project', uploadProject.value.trim())
-  form.append('usage', uploadUsage.value)
-
-  showToast('正在上传，请耐心等待...', 'success')
-  closeUploadDialog()
-
   try {
-    await apiRequest('/api/v1/media/upload', {
-      method: 'POST',
-      body: form
+    const result = await uploadMediaWithProgress({
+      file: fileToUpload,
+      project: uploadProject.value.trim(),
+      usage: uploadUsage.value,
+      signal: abortController.signal,
+      onProgress: (info) => {
+        uploadProgress.value = info
+      },
     })
-    showToast('媒体文件上传成功！')
+    const wasDuplicated = uploadProgress.value?.duplicated
+    uploading.value = false
+    uploadAbortController.value = null
+    closeUploadDialog()
+    showToast(wasDuplicated ? `⚡ 秒传成功！已复用资源 (${result.mediaId.slice(0, 8)}...)` : '媒体文件上传成功！')
     fetchAssets()
     fetchMetadata()
   } catch (e: any) {
-    showToast(e.message || '上传失败', 'error')
+    uploading.value = false
+    uploadAbortController.value = null
+    uploadProgress.value = null
+    if (e?.status === 499) {
+      showToast('已取消上传', 'error')
+    } else {
+      showToast(e.message || '上传失败', 'error')
+    }
   }
 }
 
@@ -420,21 +462,10 @@ async function copyText(txt: string) {
   }
 }
 
-function extByMIME(mime: string) {
-  const map: Record<string, string> = {
-    'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
-    'image/svg+xml': '.svg', 'image/avif': '.avif', 'image/heic': '.heic', 'image/x-icon': '.ico', 'image/vnd.microsoft.icon': '.ico',
-    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-matroska': '.mkv',
-    'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
-    'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
-  }
-  return map[mime] || ''
-}
-
 function downloadMediaAsset(asset: any) {
   const ext = extByMIME(asset.mimeType)
   const a = document.createElement('a')
-  a.href = asset.publicUrl
+  a.href = buildDownloadUrl(asset.publicUrl)
   a.download = asset.mediaId + ext
   a.click()
 }
@@ -523,7 +554,7 @@ onMounted(() => {
 
     <!-- Assets Render Area: Grid -->
     <div v-if="layoutMode === 'grid' && filteredAssets.length > 0" class="media-grid">
-      <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
+      <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card" @mouseenter="asset.mimeType.startsWith('video/') && markVideoHovered(asset.mediaId)">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
           <!-- Shimmer Skeleton while loading -->
           <div 
@@ -555,10 +586,16 @@ onMounted(() => {
             <span class="material-symbols-rounded" style="font-size: 36px; color: #fbbf24;">image</span>
             <span style="font-size: 10px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 原图</span>
           </div>
-          <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover;"></video>
+          <div v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" style="position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:#0b1014;">
+            <video v-if="hoveredVideoIds[asset.mediaId]" :src="asset.publicUrl" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover;"></video>
+            <div v-else style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:rgba(255,255,255,0.65);">
+              <span class="material-symbols-rounded" style="font-size: 40px; color: hsl(var(--md-sys-color-primary));">play_circle</span>
+              <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant));">点击播放 / 悬停预览</span>
+            </div>
+          </div>
           <div v-else-if="asset.mimeType.startsWith('audio/') && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:8px; padding:12px;">
             <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary));">music_note</span>
-            <audio :src="asset.publicUrl" controls style="width:100%; max-width:200px;"></audio>
+            <audio :src="asset.publicUrl" preload="none" controls style="width:100%; max-width:200px;" @click.stop></audio>
           </div>
           <span v-else class="material-symbols-rounded file-icon">description</span>
 
@@ -572,7 +609,7 @@ onMounted(() => {
             <span class="material-symbols-rounded" style="font-size: 14px;">headphones</span>
           </span>
 
-          <span v-if="asset.isChunked" class="badge badge-primary" style="position: absolute; top: 8px; left: 8px;">分片上传</span>
+          <span v-if="asset.isChunked" class="badge badge-primary" style="position: absolute; top: 8px; left: 8px;">分片存储</span>
         </div>
         <div class="media-card-info">
           <div class="media-id" :title="asset.mediaId">{{ asset.mediaId }}</div>
@@ -623,13 +660,14 @@ onMounted(() => {
                 <img 
                   v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
                   :src="asset.publicUrl" 
+                  loading="lazy"
                   style="width: 100%; height: 100%; object-fit: cover;" 
                   @error="onImageError(asset.mediaId)" 
                 />
                 <span v-else-if="asset.mimeType.startsWith('image/') && asset.sizeBytes <= 100" class="material-symbols-rounded" style="font-size: 20px; color: rgba(0, 229, 255, 0.45);" title="1x1 占位透明图">crop_square</span>
                 <span v-else-if="failedImages[asset.mediaId]" class="material-symbols-rounded" style="font-size: 20px; color: rgba(255,255,255,0.25);" title="预览图加载失败">broken_image</span>
                 <span v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" class="material-symbols-rounded" style="font-size: 20px; color: #fbbf24;" title="HEIC 格式图片">image</span>
-                <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted playsinline style="width: 100%; height: 100%; object-fit: cover;"></video>
+                <span v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" class="material-symbols-rounded" style="font-size: 22px; color: hsl(var(--md-sys-color-primary));">play_circle</span>
                 <span v-else-if="asset.mimeType.startsWith('audio/')" class="material-symbols-rounded" style="font-size: 20px; color: #d8b4fe;">music_note</span>
                 <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">description</span>
               </div>
@@ -713,11 +751,11 @@ onMounted(() => {
         <div class="m3-dialog-body">
           <div class="upload-drop-zone"
                :class="{ 'drop-active': dragOver, 'has-file': selectedFileName }"
-               @click="fileInputRef?.click()"
-               @dragover.prevent="dragOver = true"
+               @click="!uploading && fileInputRef?.click()"
+               @dragover.prevent="!uploading && (dragOver = true)"
                @dragleave.prevent="dragOver = false"
-               @drop.prevent="onDrop">
-             <input ref="fileInputRef" type="file" accept="image/*,video/*,audio/*,.mp3,.ogg,.wav,.aac,.flac,.m4a,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z" @change="onFileSelected" style="display: none;" />
+               @drop.prevent="!uploading && onDrop($event)">
+             <input ref="fileInputRef" type="file" accept="image/*,video/*,audio/*,.mkv,.mov,.mp4,.webm,.mp3,.ogg,.wav,.aac,.flac,.m4a,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z" @change="onFileSelected" style="display: none;" />
              <template v-if="!selectedFileName">
                <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary)); margin-bottom: 8px;">cloud_upload</span>
                <p style="font-size: 14px; color: #fff; margin: 0;">点击或拖拽文件到此处</p>
@@ -730,10 +768,10 @@ onMounted(() => {
                <div style="flex: 1; min-width: 0; margin-left: 12px;">
                  <p style="font-size: 14px; color: #fff; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ selectedFileName }}</p>
                  <p style="font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); margin: 2px 0 0;">
-                   {{ selectedFileKind === 'image' ? '图片文件' : selectedFileKind === 'video' ? '视频文件' : selectedFileKind === 'audio' ? '音频文件' : '文档/归档文件' }}
+                   {{ selectedFileKind === 'image' ? '图片文件' : selectedFileKind === 'video' ? '视频文件' : selectedFileKind === 'audio' ? '音频文件' : '文档/归档文件' }} · {{ formatBytes(selectedFileSize) }}
                  </p>
                </div>
-              <button class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 4px 8px; flex-shrink: 0;" @click.stop="clearSelectedFile">
+              <button v-if="!uploading" class="m3-btn m3-btn-secondary m3-btn-sm" style="padding: 4px 8px; flex-shrink: 0;" @click.stop="clearSelectedFile">
                 <span class="material-symbols-rounded" style="font-size: 16px;">close</span>
               </button>
             </template>
@@ -743,7 +781,7 @@ onMounted(() => {
             <div class="form-field">
               <label>所属项目 (Project)</label>
               <div class="input-wrapper" style="position: relative;">
-                <input v-model="uploadProject" type="text" list="explorer-upload-projects" placeholder="输入或选择所属项目，如 sheep" />
+                <input v-model="uploadProject" type="text" list="explorer-upload-projects" placeholder="输入或选择所属项目，如 sheep" :disabled="uploading" />
                 <datalist id="explorer-upload-projects">
                   <option v-for="p in projectsList" :key="p" :value="p" />
                 </datalist>
@@ -762,19 +800,36 @@ onMounted(() => {
 
             <div v-if="selectedFileKind === 'image'" class="form-field">
               <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-                <input type="checkbox" v-model="uploadAutoWebp" style="accent-color: hsl(var(--md-sys-color-primary));" />
+                <input type="checkbox" v-model="uploadAutoWebp" :disabled="uploading" style="accent-color: hsl(var(--md-sys-color-primary));" />
                 <span>自动优化并转换为 WebP 格式（缩减体积，加速加载）</span>
               </label>
             </div>
 
-            <div v-if="selectedFileKind === 'video'" class="form-field" style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); display: flex; align-items: center; gap: 6px;">
-              <span>⚡ 大文件/长视频支持最高 2GB，网关将自动并发分片存储并优化流式播放</span>
+            <div v-if="selectedFileKind === 'video' && !uploading" class="form-field" style="font-size: 13px; color: hsl(var(--md-sys-color-on-surface-variant)); display: flex; align-items: center; gap: 6px;">
+              <span>⚡ 大文件/长视频支持最高 2GB，自动 SHA-256 秒传预检 + 15MB 并发分片断点重试 + MP4 FastStart 流媒体优化</span>
+            </div>
+
+            <!-- Real-time Upload Progress Panel -->
+            <div v-if="uploading && uploadProgress" style="margin-top: 12px; padding: 14px 16px; border-radius: 12px; background: rgba(0, 229, 255, 0.06); border: 1px solid rgba(0, 229, 255, 0.2);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px;">
+                <span style="color: #fff; font-weight: 600;">{{ uploadProgress.stage }}</span>
+                <span style="color: hsl(var(--md-sys-color-primary)); font-family: monospace; font-weight: 700;">{{ uploadProgress.percent }}%</span>
+              </div>
+              <div style="width: 100%; height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; margin-bottom: 8px;">
+                <div :style="{ width: uploadProgress.percent + '%', height: '100%', background: 'linear-gradient(90deg, hsl(var(--md-sys-color-primary)), #38bdf8)', transition: 'width 0.2s ease' }"></div>
+              </div>
+              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: hsl(var(--md-sys-color-on-surface-variant)); font-family: monospace;">
+                <span>{{ formatBytes(uploadProgress.loadedBytes) }} / {{ formatBytes(uploadProgress.totalBytes) }}</span>
+                <span v-if="uploadProgress.speedBps > 0">{{ formatBytes(uploadProgress.speedBps) }}/s</span>
+              </div>
             </div>
           </template>
         </div>
         <div class="m3-dialog-footer">
-          <button class="m3-btn m3-btn-secondary" @click="closeUploadDialog">取消</button>
-          <button class="m3-btn m3-btn-primary" @click="submitUploadFile">确认上传</button>
+          <button class="m3-btn m3-btn-secondary" @click="closeUploadDialog">{{ uploading ? '取消上传' : '取消' }}</button>
+          <button class="m3-btn m3-btn-primary" :disabled="uploading || !selectedFileName" @click="submitUploadFile">
+            {{ uploading ? `上传中 (${uploadProgress?.percent || 0}%)...` : '确认上传' }}
+          </button>
         </div>
       </div>
     </div>
@@ -797,7 +852,7 @@ onMounted(() => {
           <span style="font-size: 13px; color: #fff;">HEIC 格式原图</span>
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
-          <video :src="activeAsset.publicUrl" controls playsinline style="width:100%; max-height:320px; object-fit:contain;"></video>
+          <video :src="activeAsset.publicUrl" controls preload="metadata" playsinline style="width:100%; max-height:320px; object-fit:contain;"></video>
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('audio/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); padding: 24px; display:flex; flex-direction:column; align-items:center; gap:12px;">
           <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>

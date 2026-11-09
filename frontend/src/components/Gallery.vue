@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, inject } from 'vue'
-import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
+import { apiRequest, openMediaAsset, copyToClipboard, buildDownloadUrl, extByMIME } from '../api'
 import type { MediaAsset } from '../api'
 import FireflySelect from './FireflySelect.vue'
 
@@ -8,6 +8,13 @@ const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('sho
 
 const loading = ref(true)
 const assets = ref<MediaAsset[]>([])
+const hoveredVideoIds = ref<Record<string, boolean>>({})
+
+function markVideoHovered(mediaId: string) {
+  if (!hoveredVideoIds.value[mediaId]) {
+    hoveredVideoIds.value[mediaId] = true
+  }
+}
 
 // Query Filters & Search Debounce
 const searchQueryInput = ref('')
@@ -199,37 +206,10 @@ async function copyText(txt: string, typeName: string) {
   }
 }
 
-function extByMIME(mime: string) {
-  const map: Record<string, string> = {
-    'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
-    'image/svg+xml': '.svg', 'image/avif': '.avif', 'image/heic': '.heic', 'image/x-icon': '.ico', 'image/vnd.microsoft.icon': '.ico',
-    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-matroska': '.mkv',
-    'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav',
-    'audio/aac': '.aac', 'audio/flac': '.flac', 'audio/mp4': '.m4a',
-    'application/pdf': '.pdf',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-    'application/msword': '.doc',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-    'application/vnd.ms-excel': '.xls',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-    'application/vnd.ms-powerpoint': '.ppt',
-    'text/csv': '.csv',
-    'text/plain': '.txt',
-    'application/zip': '.zip',
-    'application/x-rar-compressed': '.rar',
-    'application/x-7z-compressed': '.7z',
-    'application/x-tar': '.tar',
-    'application/gzip': '.gz',
-    'application/json': '.json',
-    'text/yaml': '.yaml',
-  }
-  return map[mime] || ''
-}
-
 function downloadMediaAsset(asset: MediaAsset) {
   const ext = extByMIME(asset.mimeType)
   const a = document.createElement('a')
-  a.href = asset.publicUrl
+  a.href = buildDownloadUrl(asset.publicUrl)
   a.download = asset.mediaId + ext
   a.click()
 }
@@ -289,7 +269,7 @@ onUnmounted(() => {
     </div>
 
     <div v-else-if="filteredAssets.length > 0" class="masonry-wrapper">
-      <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)">
+      <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)" @mouseenter="asset.mimeType.startsWith('video/') && markVideoHovered(asset.mediaId)">
         <div class="masonry-thumb">
           <!-- Skeleton Shimmer Placeholder while loading -->
           <div 
@@ -299,7 +279,6 @@ onUnmounted(() => {
             <div class="shimmer-sweep"></div>
             <span class="material-symbols-rounded skeleton-icon">image</span>
           </div>
-
           <!-- Progressive Smooth Loading Image (> 100 bytes) -->
           <img 
             v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
@@ -332,11 +311,17 @@ onUnmounted(() => {
             <span class="fallback-text">HEIC 格式原图</span>
           </div>
           <!-- Video -->
-          <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted playsinline></video>
+          <template v-else-if="asset.mimeType.startsWith('video/')">
+            <video v-if="hoveredVideoIds[asset.mediaId]" :src="asset.publicUrl" preload="metadata" muted playsinline></video>
+            <div v-else class="thumb-fallback">
+              <span class="material-symbols-rounded fallback-icon" style="font-size: 48px; color: hsl(var(--md-sys-color-primary));">play_circle</span>
+              <span class="fallback-text">点击播放 / 悬停预览</span>
+            </div>
+          </template>
           <!-- Audio -->
           <div v-else-if="asset.mimeType.startsWith('audio/')" class="thumb-fallback thumb-audio">
             <span class="material-symbols-rounded fallback-icon" style="color: #d8b4fe;">music_note</span>
-            <audio :src="asset.publicUrl" controls style="width:100%; max-width:240px;"></audio>
+            <audio :src="asset.publicUrl" preload="none" controls style="width:100%; max-width:240px;" @click.stop></audio>
           </div>
           <!-- Other File Types -->
           <div v-else class="thumb-fallback">
@@ -394,7 +379,7 @@ onUnmounted(() => {
         <div class="m3-dialog-body share-dialog-body">
           <div class="share-preview">
             <img v-if="activeAsset.mimeType.startsWith('image/')" :src="activeAsset.publicUrl" alt="Preview" />
-            <video v-else-if="activeAsset.mimeType.startsWith('video/')" :src="activeAsset.publicUrl" controls playsinline></video>
+            <video v-else-if="activeAsset.mimeType.startsWith('video/')" :src="activeAsset.publicUrl" controls preload="metadata" playsinline></video>
           </div>
 
           <!-- Sharing Links Blocks -->

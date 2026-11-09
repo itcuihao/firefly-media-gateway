@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,10 +48,10 @@ type WorkerProvider struct {
 // NewWorkerProvider 创建 Worker provider
 func NewWorkerProvider(baseURL, authToken string) *WorkerProvider {
 	return &WorkerProvider{
-		baseURL:   baseURL,
+		baseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		authToken: authToken,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 180 * time.Second,
 		},
 	}
 }
@@ -59,67 +60,159 @@ func (p *WorkerProvider) Name() string {
 	return "worker"
 }
 
-// Upload 上传文件到 Worker
+// Upload 上传文件到 Worker（支持零拷贝流式 Multipart 与 429/5xx 智能重试）
 func (p *WorkerProvider) Upload(ctx context.Context, in UploadInput) (UploadResult, error) {
-	// 准备表单数据
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-
-	// 添加文件
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(in.FileName)))
-	contentType := in.MIMEType
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	h.Set("Content-Type", contentType)
-
-	part, err := mw.CreatePart(h)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("create form part: %w", err)
-	}
-	if _, err := io.Copy(part, in.Reader); err != nil {
-		return UploadResult{}, fmt.Errorf("copy file body: %w", err)
+	contentTypeHeader := in.MIMEType
+	if contentTypeHeader == "" {
+		contentTypeHeader = "application/octet-stream"
 	}
 
-	if err := mw.Close(); err != nil {
-		return UploadResult{}, fmt.Errorf("close multipart writer: %w", err)
+	var rs io.ReadSeeker
+	var startOffset int64
+	var payloadSize int64
+	canSeek := false
+	if seeker, ok := in.Reader.(io.ReadSeeker); ok {
+		if cur, err1 := seeker.Seek(0, io.SeekCurrent); err1 == nil {
+			if end, err2 := seeker.Seek(0, io.SeekEnd); err2 == nil {
+				if _, err3 := seeker.Seek(cur, io.SeekStart); err3 == nil {
+					rs = seeker
+					startOffset = cur
+					payloadSize = end - cur
+					canSeek = true
+				}
+			}
+		}
 	}
 
-	// 构建请求
+	var (
+		formContentType string
+		headerBytes     []byte
+		footerBytes     []byte
+		reqBytes        []byte
+	)
+
+	if canSeek {
+		var headerBuf bytes.Buffer
+		mw := multipart.NewWriter(&headerBuf)
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(in.FileName)))
+		h.Set("Content-Type", contentTypeHeader)
+		if _, err := mw.CreatePart(h); err != nil {
+			return UploadResult{}, fmt.Errorf("create form part: %w", err)
+		}
+		formContentType = mw.FormDataContentType()
+		headerBytes = headerBuf.Bytes()
+		footerBytes = []byte(fmt.Sprintf("\r\n--%s--\r\n", mw.Boundary()))
+	} else {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(in.FileName)))
+		h.Set("Content-Type", contentTypeHeader)
+		part, err := mw.CreatePart(h)
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("create form part: %w", err)
+		}
+		if _, err := io.Copy(part, in.Reader); err != nil {
+			return UploadResult{}, fmt.Errorf("copy file body: %w", err)
+		}
+		if err := mw.Close(); err != nil {
+			return UploadResult{}, fmt.Errorf("close multipart writer: %w", err)
+		}
+		formContentType = mw.FormDataContentType()
+		reqBytes = body.Bytes()
+	}
+
 	reqURL := p.baseURL + "/upload"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, &body)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("build upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+p.authToken)
+	const maxRetries = 4
+	var lastErr error
 
-	// 发送请求
-	resp, err := retryableHTTPDo(p.client, req, 2)
-	if err != nil {
-		return UploadResult{}, fmt.Errorf("call Worker upload: %w", err)
-	}
-	defer resp.Body.Close()
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return UploadResult{}, ctx.Err()
+		default:
+		}
 
-	if resp.StatusCode != http.StatusCreated {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return UploadResult{}, fmt.Errorf("Worker upload status=%d body=%s", resp.StatusCode, string(b))
+		var bodyReader io.Reader
+		var contentLen int64
+		if canSeek {
+			if _, err := rs.Seek(startOffset, io.SeekStart); err != nil {
+				return UploadResult{}, fmt.Errorf("rewind upload reader: %w", err)
+			}
+			bodyReader = io.MultiReader(
+				bytes.NewReader(headerBytes),
+				io.LimitReader(rs, payloadSize),
+				bytes.NewReader(footerBytes),
+			)
+			contentLen = int64(len(headerBytes)) + payloadSize + int64(len(footerBytes))
+		} else {
+			bodyReader = bytes.NewReader(reqBytes)
+			contentLen = int64(len(reqBytes))
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bodyReader)
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("build upload request: %w", err)
+		}
+		req.Header.Set("Content-Type", formContentType)
+		req.Header.Set("Authorization", "Bearer "+p.authToken)
+		req.ContentLength = contentLen
+
+		resp, err := p.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("call Worker upload: %w", err)
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			continue
+		}
+
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			waitSec := 3
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if n, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && n > 0 {
+					waitSec = n
+				}
+			}
+			var errResp workerUploadResponse
+			if err := json.Unmarshal(b, &errResp); err == nil && errResp.RetryAfter > 0 {
+				waitSec = errResp.RetryAfter
+			}
+			lastErr = fmt.Errorf("Worker rate limit (429): retry after %d seconds", waitSec)
+			select {
+			case <-ctx.Done():
+				return UploadResult{}, ctx.Err()
+			case <-time.After(time.Duration(waitSec)*time.Second + 200*time.Millisecond):
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("Worker upload status=%d body=%s", resp.StatusCode, string(b))
+			if resp.StatusCode >= 500 && attempt < maxRetries {
+				time.Sleep(time.Duration(attempt+1) * 1 * time.Second)
+				continue
+			}
+			return UploadResult{}, lastErr
+		}
+
+		var result workerUploadResponse
+		if err := json.Unmarshal(b, &result); err != nil {
+			return UploadResult{}, fmt.Errorf("decode upload response: %w", err)
+		}
+		if !result.Success {
+			return UploadResult{}, fmt.Errorf("Worker upload failed: %s", result.Error)
+		}
+
+		return UploadResult{
+			ProviderFileID:       result.FileID,
+			ProviderBucketOrChat: &result.GroupID,
+		}, nil
 	}
 
-	// 解析响应
-	var result workerUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return UploadResult{}, fmt.Errorf("decode upload response: %w", err)
-	}
-	if !result.Success {
-		return UploadResult{}, fmt.Errorf("Worker upload failed: %s", result.Error)
-	}
-
-	return UploadResult{
-		ProviderFileID:       result.FileID,
-		ProviderBucketOrChat: &result.GroupID,
-	}, nil
+	return UploadResult{}, lastErr
 }
 
 // Delete 删除文件（通过 Worker）
@@ -130,59 +223,30 @@ func (p *WorkerProvider) Delete(ctx context.Context, providerFileID string, buck
 	return nil
 }
 
-// GetAccess 获取文件访问 URL（使用 Worker /get 端点）
-func (p *WorkerProvider) GetAccess(ctx context.Context, providerFileID string, _ *string) (AccessResult, error) {
-	// 调用 Worker 的 /get 端点获取 stream_url
+// GetAccess 获取文件访问 URL（直接构造 Worker /stream 端点，消除多余的 /get 网络往返）
+func (p *WorkerProvider) GetAccess(_ context.Context, providerFileID string, _ *string) (AccessResult, error) {
+	if strings.TrimSpace(providerFileID) == "" {
+		return AccessResult{}, fmt.Errorf("providerFileID is required")
+	}
 	params := url.Values{}
 	params.Set("file_id", providerFileID)
 
-	reqURL := fmt.Sprintf("%s/get?%s", p.baseURL, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return AccessResult{}, fmt.Errorf("build get request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+p.authToken)
-
-	resp, err := retryableHTTPDo(p.client, req, 2)
-	if err != nil {
-		return AccessResult{}, fmt.Errorf("call Worker get: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return AccessResult{}, fmt.Errorf("Worker get status=%d body=%s", resp.StatusCode, string(b))
-	}
-
-	var result workerGetResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return AccessResult{}, fmt.Errorf("decode get response: %w", err)
-	}
-	if !result.Success {
-		return AccessResult{}, fmt.Errorf("Worker get failed: %s", result.Error)
-	}
-
+	streamURL := fmt.Sprintf("%s/stream?%s", p.baseURL, params.Encode())
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+p.authToken)
+	if p.authToken != "" {
+		header.Set("Authorization", "Bearer "+p.authToken)
+	}
 
 	return AccessResult{
-		URL:    result.StreamURL,
+		URL:    streamURL,
 		Header: header,
 	}, nil
 }
 
 type workerUploadResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-	FileID  string `json:"file_id"`
-	GroupID string `json:"group_id"`
-}
-
-type workerGetResponse struct {
-	Success  bool   `json:"success"`
-	Error    string `json:"error,omitempty"`
-	FileID   string `json:"file_id"`
-	StreamURL string `json:"stream_url"`
-	MimeType string `json:"mime_type"`
-	FileSize int    `json:"file_size"`
+	Success    bool   `json:"success"`
+	Error      string `json:"error,omitempty"`
+	FileID     string `json:"file_id"`
+	GroupID    string `json:"group_id"`
+	RetryAfter int    `json:"retry_after,omitempty"`
 }

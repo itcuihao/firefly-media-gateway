@@ -27,6 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_status ON media_assets(status);
 CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(project);
 CREATE INDEX IF NOT EXISTS idx_media_assets_created_at ON media_assets(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_media_assets_is_chunked ON media_assets(is_chunked);
+CREATE INDEX IF NOT EXISTS idx_media_assets_sha256 ON media_assets(sha256);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

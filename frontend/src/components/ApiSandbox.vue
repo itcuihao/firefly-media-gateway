@@ -394,9 +394,9 @@ const generatedCurl = computed(() => {
         fileName = fileName + '.webp'
       }
     }
-    multipartParts.push({ key: 'file', value: `@${fileName}`, isFile: true })
     multipartParts.push({ key: 'project', value: sbProject.value.trim() })
     multipartParts.push({ key: 'usage', value: sbUsage.value.trim() })
+    multipartParts.push({ key: 'file', value: `@${fileName}`, isFile: true })
   } else if (selectedApi.value === 's3_buckets') {
     path = '/s3'
     method = 'GET'
@@ -550,9 +550,9 @@ async function runSandboxApi() {
 
       fetchUrl = '/api/v1/media/upload'
       const form = new FormData()
-      form.append('file', fileToUpload)
       form.append('project', project)
       form.append('usage', usage)
+      form.append('file', fileToUpload)
 
       options = {
         method: 'POST',

@@ -25,12 +25,16 @@ import (
 )
 
 type memoryProvider struct {
-	mu    sync.Mutex
-	files map[string][]byte
+	mu          sync.Mutex
+	files       map[string][]byte
+	accessCalls map[string]int
 }
 
 func newMemoryProvider() *memoryProvider {
-	return &memoryProvider{files: make(map[string][]byte)}
+	return &memoryProvider{
+		files:       make(map[string][]byte),
+		accessCalls: make(map[string]int),
+	}
 }
 
 func (p *memoryProvider) Name() string { return "mem" }
@@ -60,6 +64,9 @@ func (p *memoryProvider) Delete(ctx context.Context, providerFileID string, buck
 }
 
 func (p *memoryProvider) GetAccess(ctx context.Context, providerFileID string, bucketOrChat *string) (provider.AccessResult, error) {
+	p.mu.Lock()
+	p.accessCalls[providerFileID]++
+	p.mu.Unlock()
 	return provider.AccessResult{
 		URL: fmt.Sprintf("http://mock-storage.internal/%s", providerFileID),
 	}, nil
@@ -257,6 +264,10 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 		}
 
 		// 3a. Range request within first chunk: bytes 100-199
+		memProv.mu.Lock()
+		memProv.accessCalls = make(map[string]int)
+		memProv.mu.Unlock()
+
 		req1 := httptest.NewRequest("GET", "/api/v1/media/"+largeAssetID+"/stream", nil)
 		req1.Header.Set("Range", "bytes=100-199")
 		req1.Header.Set("Authorization", "Bearer test-token")
@@ -268,6 +279,39 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 		}
 		if !bytes.Equal(rr1.Body.Bytes(), largeVideoData[100:200]) {
 			t.Fatalf("streamed bytes do not match expected slice")
+		}
+
+		// Verify lazy chunk resolution: ONLY chunk 0 should have had GetAccess called (1 call total, not 2!)
+		memProv.mu.Lock()
+		totalCallsAfterReq1 := 0
+		for _, c := range memProv.accessCalls {
+			totalCallsAfterReq1 += c
+		}
+		memProv.mu.Unlock()
+		if totalCallsAfterReq1 != 1 {
+			t.Fatalf("expected exactly 1 GetAccess call for single-chunk Range request, got %d", totalCallsAfterReq1)
+		}
+
+		// 3a-bis. Second Range request within chunk 0: should hit in-memory access cache (0 new GetAccess calls)
+		req1Cached := httptest.NewRequest("GET", "/api/v1/media/"+largeAssetID+"/stream?download=1", nil)
+		req1Cached.Header.Set("Range", "bytes=200-299")
+		req1Cached.Header.Set("Authorization", "Bearer test-token")
+		rr1Cached := httptest.NewRecorder()
+		handler.ServeHTTP(rr1Cached, req1Cached)
+		if rr1Cached.Code != http.StatusPartialContent {
+			t.Fatalf("expected 206 Partial Content on cached request, got %d", rr1Cached.Code)
+		}
+		if !strings.HasPrefix(rr1Cached.Header().Get("Content-Disposition"), "attachment;") {
+			t.Errorf("expected Content-Disposition attachment when ?download=1 is set, got %q", rr1Cached.Header().Get("Content-Disposition"))
+		}
+		memProv.mu.Lock()
+		totalCallsAfterCached := 0
+		for _, c := range memProv.accessCalls {
+			totalCallsAfterCached += c
+		}
+		memProv.mu.Unlock()
+		if totalCallsAfterCached != 1 {
+			t.Fatalf("expected 0 additional GetAccess calls on cached chunk 0 request, total calls=%d", totalCallsAfterCached)
 		}
 
 		// 3b. Range request SPANNING CHUNK BOUNDARY (chunkSize is 15MB = 15728640 bytes)
@@ -387,6 +431,79 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 		}
 		if len(s3Chunks) != 2 {
 			t.Errorf("expected 2 chunks for S3 16MB video, got %d", len(s3Chunks))
+		}
+	})
+
+	// ==========================================
+	// Test Case 5: Chunked Upload Session API (init -> chunk -> complete) + Deduplication
+	// ==========================================
+	t.Run("Chunked Upload Session API (init, chunk, complete, and instant dedup)", func(t *testing.T) {
+		const sessionFileSize = 2 * 1024 * 1024 // 2MB MP4
+		sessionData := make([]byte, sessionFileSize)
+		for i := range sessionData {
+			sessionData[i] = byte((i*13 + 5) % 256)
+		}
+
+		initPayload := fmt.Sprintf(`{"project":"session-proj","usage":"scene","fileName":"clip.mov","mimeType":"video/quicktime","sizeBytes":%d}`, sessionFileSize)
+		initReq := httptest.NewRequest("POST", "/api/v1/media/upload/init", strings.NewReader(initPayload))
+		initReq.Header.Set("Authorization", "Bearer test-token")
+		initReq.Header.Set("Content-Type", "application/json")
+		initRR := httptest.NewRecorder()
+		handler.ServeHTTP(initRR, initReq)
+
+		if initRR.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from upload/init, got %d: %s", initRR.Code, initRR.Body.String())
+		}
+		var initResp media.InitUploadOutput
+		if err := json.Unmarshal(initRR.Body.Bytes(), &initResp); err != nil {
+			t.Fatalf("unmarshal init response: %v", err)
+		}
+		if initResp.UploadID == "" || initResp.TotalChunks != 1 {
+			t.Fatalf("unexpected init response: %+v", initResp)
+		}
+
+		// Upload chunk 0
+		chunkReq := httptest.NewRequest("POST", "/api/v1/media/upload/"+initResp.UploadID+"/chunk?index=0", bytes.NewReader(sessionData))
+		chunkReq.Header.Set("Authorization", "Bearer test-token")
+		chunkRR := httptest.NewRecorder()
+		handler.ServeHTTP(chunkRR, chunkReq)
+		if chunkRR.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from upload/chunk, got %d: %s", chunkRR.Code, chunkRR.Body.String())
+		}
+
+		// Complete upload
+		compReq := httptest.NewRequest("POST", "/api/v1/media/upload/"+initResp.UploadID+"/complete", nil)
+		compReq.Header.Set("Authorization", "Bearer test-token")
+		compRR := httptest.NewRecorder()
+		handler.ServeHTTP(compRR, compReq)
+		if compRR.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created from upload/complete, got %d: %s", compRR.Code, compRR.Body.String())
+		}
+
+		var completedAsset media.Asset
+		if err := json.Unmarshal(compRR.Body.Bytes(), &completedAsset); err != nil {
+			t.Fatalf("unmarshal completed asset: %v", err)
+		}
+		if completedAsset.SHA256 == nil || *completedAsset.SHA256 == "" {
+			t.Fatalf("expected SHA256 on completed asset")
+		}
+
+		// Test instant deduplication on init when sha256 matches
+		dedupPayload := fmt.Sprintf(`{"project":"session-proj","usage":"scene","fileName":"clip-copy.mov","mimeType":"video/quicktime","sizeBytes":%d,"sha256":%q}`, sessionFileSize, *completedAsset.SHA256)
+		dedupReq := httptest.NewRequest("POST", "/api/v1/media/upload/init", strings.NewReader(dedupPayload))
+		dedupReq.Header.Set("Authorization", "Bearer test-token")
+		dedupReq.Header.Set("Content-Type", "application/json")
+		dedupRR := httptest.NewRecorder()
+		handler.ServeHTTP(dedupRR, dedupReq)
+		if dedupRR.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from dedup upload/init, got %d: %s", dedupRR.Code, dedupRR.Body.String())
+		}
+		var dedupResp media.InitUploadOutput
+		if err := json.Unmarshal(dedupRR.Body.Bytes(), &dedupResp); err != nil {
+			t.Fatalf("unmarshal dedup init response: %v", err)
+		}
+		if !dedupResp.Duplicated || dedupResp.Asset == nil {
+			t.Fatalf("expected instant deduplication (duplicated=true), got %+v", dedupResp)
 		}
 	})
 }

@@ -109,10 +109,24 @@ const ALLOWED_MIME_TYPES = [
   'application/json',
   'text/yaml',
   'application/x-yaml',
+  'application/octet-stream',
 ];
 
 // 最大文件大小（Telegram 限制 50MB）
 const DEFAULT_MAX_SIZE = 50 * 1024 * 1024;
+
+// Telegram file_path 内存缓存（Telegram 官方保证有效期至少 1 小时，缓存 45 分钟）
+interface CachedTelegramFile {
+  botName: string;
+  botToken: string;
+  filePath: string;
+  mimeType: string;
+  fileSize: number;
+  expiresAt: number;
+}
+const FILE_PATH_CACHE = new Map<string, CachedTelegramFile>();
+const FILE_CACHE_TTL_MS = 45 * 60 * 1000;
+let rrBotCounter = 0;
 
 /**
  * 鉴权中间件
@@ -210,10 +224,12 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
   const formData = await request.formData();
   const file = formData.get('file') as File | null;
 
-  // 获取 bot 名称（优先 header，其次 form）
+  // 获取 bot 名称（优先 header，其次 form；未指定时在多 bot 间轮询负载均衡）
   let botName = request.headers.get('X-Bot-Name') || formData.get('bot') as string || '';
-  if (!botName && botConfigs.size === 1) {
-    botName = botConfigs.keys().next().value || '';
+  if (!botName && botConfigs.size > 0) {
+    const keys = Array.from(botConfigs.keys());
+    botName = keys[rrBotCounter % keys.length] || '';
+    rrBotCounter = (rrBotCounter + 1) % 1000000;
   }
 
   // 获取 group ID（优先 form，其次 bot 配置的默认值）
@@ -263,6 +279,26 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
     );
 
     const tgData = await tgResponse.json() as any;
+
+    if (tgResponse.status === 429 || tgData.error_code === 429) {
+      const retryAfter = tgData?.parameters?.retry_after || 3;
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: `Telegram rate limit: retry after ${retryAfter}s`,
+          code: 'TG_RATE_LIMIT',
+          retry_after: retryAfter,
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Retry-After': String(retryAfter),
+          },
+        }
+      );
+    }
 
     if (!tgData.ok) {
       return error(
@@ -327,17 +363,28 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
       timestamp: new Date().toISOString(),
     };
 
-    // 获取 file_url（需要额外调用 getFile）
-    try {
-      const fileResponse = await fetch(
-        `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${doc.file_id}`
-      );
-      const fileData = await fileResponse.json() as any;
-      if (fileData.ok && fileData.result.file_path) {
-        response.file_url = `https://api.telegram.org/file/bot${botConfig.token}/${fileData.result.file_path}`;
+    // 仅在显式请求 include_url=true 时才额外调用 getFile，避免分片上传时成倍增加延迟
+    const reqUrl = new URL(request.url);
+    if (reqUrl.searchParams.get('include_url') === 'true') {
+      try {
+        const fileResponse = await fetch(
+          `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${doc.file_id}`
+        );
+        const fileData = await fileResponse.json() as any;
+        if (fileData.ok && fileData.result.file_path) {
+          response.file_url = `https://api.telegram.org/file/bot${botConfig.token}/${fileData.result.file_path}`;
+          FILE_PATH_CACHE.set(doc.file_id, {
+            botName,
+            botToken: botConfig.token,
+            filePath: fileData.result.file_path,
+            mimeType: response.mime_type || 'application/octet-stream',
+            fileSize: response.file_size,
+            expiresAt: Date.now() + FILE_CACHE_TTL_MS,
+          });
+        }
+      } catch {
+        // getFile 失败不影响上传成功
       }
-    } catch {
-      // getFile 失败不影响上传成功
     }
 
     return jsonResponse(response, 201);
@@ -428,16 +475,56 @@ async function handleDeleteFile(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * 查找能访问指定文件的 bot（自动匹配）
+ * 解析并缓存 Telegram 文件路径（消除重复 getFile 请求）
  */
-async function findBotForFile(
+async function resolveTelegramFile(
   fileId: string,
-  botConfigs: Map<string, BotConfig>
-): Promise<{ botName: string; botConfig: BotConfig } | null> {
+  headerBotName: string | null,
+  botConfigs: Map<string, BotConfig>,
+  forceRefresh = false
+): Promise<{ cached?: CachedTelegramFile; errorResp?: Response }> {
+  const now = Date.now();
+  if (!forceRefresh) {
+    const hit = FILE_PATH_CACHE.get(fileId);
+    if (hit && now < hit.expiresAt && (!headerBotName || hit.botName === headerBotName)) {
+      return { cached: hit };
+    }
+  }
+
+  if (headerBotName) {
+    const botConfig = getBotConfig(botConfigs, headerBotName);
+    if (!botConfig) {
+      return { errorResp: error(`Bot not found: ${headerBotName}`, 'BOT_NOT_FOUND', 404) };
+    }
+    const resp = await fetch(`https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${fileId}`);
+    const data = await resp.json() as any;
+    if (!data.ok || !data.result?.file_path) {
+      return {
+        errorResp: error(
+          `Telegram API error: ${data.description || 'Unknown'}`,
+          'TG_API_ERROR',
+          502
+        ),
+      };
+    }
+    const entry: CachedTelegramFile = {
+      botName: headerBotName,
+      botToken: botConfig.token,
+      filePath: data.result.file_path,
+      mimeType: data.result.mime_type || 'application/octet-stream',
+      fileSize: data.result.file_size || 0,
+      expiresAt: now + FILE_CACHE_TTL_MS,
+    };
+    if (FILE_PATH_CACHE.size > 5000) FILE_PATH_CACHE.clear();
+    FILE_PATH_CACHE.set(fileId, entry);
+    return { cached: entry };
+  }
+
+  // 未指定 bot_name 时遍历匹配，直接复用匹配成功的 getFile 结果，不再二次请求
   for (const [botName, cfg] of botConfigs) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
       const resp = await fetch(
         `https://api.telegram.org/bot${cfg.token}/getFile?file_id=${fileId}`,
@@ -446,15 +533,25 @@ async function findBotForFile(
       clearTimeout(timeoutId);
 
       const data = await resp.json() as any;
-      if (data.ok) {
-        return { botName, botConfig: cfg };
+      if (data.ok && data.result?.file_path) {
+        const entry: CachedTelegramFile = {
+          botName,
+          botToken: cfg.token,
+          filePath: data.result.file_path,
+          mimeType: data.result.mime_type || 'application/octet-stream',
+          fileSize: data.result.file_size || 0,
+          expiresAt: now + FILE_CACHE_TTL_MS,
+        };
+        if (FILE_PATH_CACHE.size > 5000) FILE_PATH_CACHE.clear();
+        FILE_PATH_CACHE.set(fileId, entry);
+        return { cached: entry };
       }
     } catch {
-      // 继续尝试下一个 bot
       continue;
     }
   }
-  return null;
+
+  return { errorResp: error('No bot can access this file', 'FILE_NOT_ACCESSIBLE', 404) };
 }
 
 /**
@@ -537,46 +634,13 @@ async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext)
     return error('No bot configured', 'NO_BOT_CONFIG', 500);
   }
 
-  let botName: string | null = null;
-  let botConfig: BotConfig | null = null;
-
-  // 1. 优先从 Header 获取 bot_name
-  const headerBotName = request.headers.get('X-Bot-Name');
-  if (headerBotName) {
-    botName = headerBotName;
-    botConfig = getBotConfig(botConfigs, botName);
-    if (!botConfig) {
-      return error(`Bot not found: ${botName}`, 'BOT_NOT_FOUND', 404);
-    }
-  }
-
-  // 2. 如果 Header 没指定，自动匹配
-  if (!botConfig) {
-    const match = await findBotForFile(fileId, botConfigs);
-    if (!match) {
-      return error('No bot can access this file', 'FILE_NOT_ACCESSIBLE', 404);
-    }
-    botName = match.botName;
-    botConfig = match.botConfig;
-  }
-
   try {
-    const getFileResp = await fetch(
-      `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${fileId}`
-    );
-    const getFileData = await getFileResp.json() as any;
-
-    if (!getFileData.ok) {
-      return error(
-        `Telegram API error: ${getFileData.description || 'Unknown'}`,
-        'TG_API_ERROR',
-        502
-      );
+    const headerBotName = request.headers.get('X-Bot-Name');
+    const resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs);
+    if (resolved.errorResp || !resolved.cached) {
+      return resolved.errorResp!;
     }
-
-    const filePath = getFileData.result.file_path;
-    const mimeType = getFileData.result.mime_type || 'application/octet-stream';
-    const fileSize = getFileData.result.file_size || 0;
+    const { botName, botToken, filePath, mimeType, fileSize } = resolved.cached;
 
     const resp: GetFileResponse = {
       success: true,
@@ -589,7 +653,7 @@ async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext)
 
     // Debug 模式：额外返回 TG URL（包含 token）
     if (debugMode) {
-      resp.tg_url = `https://api.telegram.org/file/bot${botConfig.token}/${filePath}`;
+      resp.tg_url = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
     }
 
     const extraHeaders: Record<string, string> = {};
@@ -675,7 +739,7 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
   const cache = typeof caches !== 'undefined' ? ((caches as any).default as Cache | undefined) : null;
   const cacheKey = new Request(url.toString(), { method: 'GET' });
 
-  if (cache && !isPrivate && !rangeHeader) {
+  if (cache && !isPrivate && !rangeHeader && request.method === 'GET') {
     try {
       const cached = await cache.match(cacheKey);
       if (cached) {
@@ -696,49 +760,14 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
     return error('No bot configured', 'NO_BOT_CONFIG', 500);
   }
 
-  let botName: string | null = null;
-  let botConfig: BotConfig | null = null;
-
-  // 1. 优先从 Header 获取 bot_name
-  const headerBotName = request.headers.get('X-Bot-Name');
-  if (headerBotName) {
-    botName = headerBotName;
-    botConfig = getBotConfig(botConfigs, botName);
-    if (!botConfig) {
-      return error(`Bot not found: ${botName}`, 'BOT_NOT_FOUND', 404);
-    }
-  }
-
-  // 2. 如果 Header 没指定，自动匹配
-  if (!botConfig) {
-    const match = await findBotForFile(fileId, botConfigs);
-    if (!match) {
-      return error('No bot can access this file', 'FILE_NOT_ACCESSIBLE', 404);
-    }
-    botName = match.botName;
-    botConfig = match.botConfig;
-  }
-
   try {
-    // 获取 Telegram 文件信息
-    const getFileResp = await fetch(
-      `https://api.telegram.org/bot${botConfig.token}/getFile?file_id=${fileId}`
-    );
-    const getFileData = await getFileResp.json() as any;
-
-    if (!getFileData.ok) {
-      return error(
-        `Telegram API error: ${getFileData.description || 'Unknown'}`,
-        'TG_API_ERROR',
-        502
-      );
+    const headerBotName = request.headers.get('X-Bot-Name');
+    let resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, false);
+    if (resolved.errorResp || !resolved.cached) {
+      return resolved.errorResp!;
     }
 
-    const filePath = getFileData.result.file_path;
-    const tgFileUrl = `https://api.telegram.org/file/bot${botConfig.token}/${filePath}`;
-    const mimeType = getFileData.result.mime_type || 'application/octet-stream';
-    const fileSize = getFileData.result.file_size || 0;
-
+    const { botName, mimeType, fileSize } = resolved.cached;
     const ext = extByMIME(mimeType);
     const filename = `${fileId}${ext}`;
 
@@ -782,21 +811,26 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
 
     // 流式返回文件
     const headers = new Headers();
-
-    // 转发 Range 头（支持视频进度条）
     if (rangeHeader) {
       headers.set('Range', rangeHeader);
     }
 
-    // 获取文件
-    const fileResp = await fetch(tgFileUrl, {
-      headers: headers,
-    });
+    let tgFileUrl = `https://api.telegram.org/file/bot${resolved.cached.botToken}/${resolved.cached.filePath}`;
+    let fileResp = await fetch(tgFileUrl, { headers });
 
-    // 构建响应
+    // 若缓存的 file_path 提前失效，强制刷新一次重试
+    if (fileResp.status === 404 || fileResp.status === 403) {
+      resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, true);
+      if (resolved.errorResp || !resolved.cached) {
+        return resolved.errorResp!;
+      }
+      tgFileUrl = `https://api.telegram.org/file/bot${resolved.cached.botToken}/${resolved.cached.filePath}`;
+      fileResp = await fetch(tgFileUrl, { headers });
+    }
+
+    // 构建响应头（正确透传 206 Partial Content 的 Content-Range 与实际分段 Content-Length）
     const responseHeaders = new Headers();
     responseHeaders.set('Content-Type', mimeType);
-
     responseHeaders.set('Accept-Ranges', 'bytes');
     if (isPrivate) {
       responseHeaders.set('Cache-Control', 'private, no-cache');
@@ -822,7 +856,7 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
       const upstreamLength = fileResp.headers.get('Content-Length');
       if (upstreamLength) {
         responseHeaders.set('Content-Length', upstreamLength);
-      } else if (fileSize > 0) {
+      } else if (!rangeHeader && fileSize > 0) {
         responseHeaders.set('Content-Length', String(fileSize));
       }
 
@@ -934,8 +968,8 @@ function handleOptions(): Response {
     status: 204,
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Bot-Name',
+      'Access-Control-Allow-Methods': 'POST, GET, HEAD, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Bot-Name, Range',
       'Access-Control-Max-Age': '86400',
     },
   });
@@ -949,6 +983,7 @@ router
   .post('/upload', (request, env) => handleUpload(request, env))
   .get('/get', (request, env, ctx) => handleGetFile(request, env, ctx))
   .get('/stream', (request, env, ctx) => handleStreamFile(request, env, ctx))
+  .head('/stream', (request, env, ctx) => handleStreamFile(request, env, ctx))
   .delete('/delete', (request, env) => handleDeleteFile(request, env))
   .post('/delete', (request, env) => handleDeleteFile(request, env));
 

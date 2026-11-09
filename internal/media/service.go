@@ -31,7 +31,59 @@ const (
 	maxAudioSizeBytes int64 = 50 * 1024 * 1024   // 50MB for audio
 	maxFileSizeBytes  int64 = 500 * 1024 * 1024  // 500MB for generic files
 	chunkSize         int64 = 15 * 1024 * 1024   // 15MB per chunk (under Telegram download limit of 20MB)
+
+	accessCacheTTL  = 45 * time.Minute
+	metaCacheTTL    = 15 * time.Minute
+	sessionExpireTTL = 2 * time.Hour
 )
+
+type cachedAccessEntry struct {
+	result    provider.AccessResult
+	expiresAt time.Time
+}
+
+type cachedAssetEntry struct {
+	asset     Asset
+	expiresAt time.Time
+}
+
+type cachedChunksEntry struct {
+	chunks    []Chunk
+	expiresAt time.Time
+}
+
+type uploadSession struct {
+	mu           sync.Mutex
+	id           string
+	project      string
+	usage        string
+	fileName     string
+	declaredMIME string
+	sizeBytes    int64
+	totalChunks  int
+	tmpFile      *os.File
+	sniff        []byte
+	received     map[int]bool
+	createdAt    time.Time
+}
+
+type InitUploadInput struct {
+	Project          string
+	Usage            string
+	FileName         string
+	DeclaredMIMEType string
+	SizeBytes        int64
+	SHA256           string
+	OverrideProvider provider.StorageProvider
+}
+
+type InitUploadOutput struct {
+	Duplicated  bool   `json:"duplicated"`
+	Asset       *Asset `json:"asset,omitempty"`
+	UploadID    string `json:"uploadId,omitempty"`
+	ChunkSize   int64  `json:"chunkSize,omitempty"`
+	TotalChunks int    `json:"totalChunks,omitempty"`
+}
 
 type UploadRequest struct {
 	ID                  string // Optional: explicit 32-char hex asset ID
@@ -50,6 +102,14 @@ type Service struct {
 	defaultProvider   string
 	publicBaseURL     string
 	uploadConcurrency int
+
+	cacheMu     sync.RWMutex
+	accessCache map[string]cachedAccessEntry
+	assetCache  map[string]cachedAssetEntry
+	chunksCache map[string]cachedChunksEntry
+
+	sessionsMu     sync.Mutex
+	uploadSessions map[string]*uploadSession
 }
 
 func NewService(repo Repository, providers map[string]provider.StorageProvider, defaultProvider, publicBaseURL string) *Service {
@@ -59,6 +119,10 @@ func NewService(repo Repository, providers map[string]provider.StorageProvider, 
 		defaultProvider:   defaultProvider,
 		publicBaseURL:     strings.TrimRight(publicBaseURL, "/"),
 		uploadConcurrency: 3,
+		accessCache:       make(map[string]cachedAccessEntry),
+		assetCache:        make(map[string]cachedAssetEntry),
+		chunksCache:       make(map[string]cachedChunksEntry),
+		uploadSessions:    make(map[string]*uploadSession),
 	}
 }
 
@@ -187,16 +251,19 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		} else if fsFile != tmpFile {
 			defer os.Remove(fsFile.Name())
 			defer fsFile.Close()
+			if st, statErr := fsFile.Stat(); statErr == nil && st.Size() > 0 {
+				sizeBytes = st.Size()
+			}
 			tmpFile = fsFile
 		}
 	}
 
-	// Check if chunking is needed (auto-chunk videos exceeding chunk size)
-	if sizeBytes <= chunkSize || mediaKind != "video" {
+	// Check if chunking is needed (auto-chunk any file exceeding chunk size to stay under Telegram 20MB getFile limit)
+	if sizeBytes <= chunkSize {
 		return s.uploadSingle(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
 	}
 
-	// Chunked upload for large videos
+	// Chunked upload for large files/videos
 	return s.uploadChunked(ctx, p, tmpFile, req, mimeType, sizeBytes, shaHex)
 }
 
@@ -396,7 +463,91 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 }
 
 func (s *Service) GetMeta(ctx context.Context, id string) (Asset, error) {
-	return s.repo.GetByID(ctx, id)
+	now := time.Now()
+	s.cacheMu.RLock()
+	if entry, ok := s.assetCache[id]; ok && now.Before(entry.expiresAt) {
+		s.cacheMu.RUnlock()
+		return entry.asset, nil
+	}
+	s.cacheMu.RUnlock()
+
+	asset, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return Asset{}, err
+	}
+	if asset.Status == StatusActive {
+		s.cacheMu.Lock()
+		if len(s.assetCache) > 4096 {
+			s.assetCache = make(map[string]cachedAssetEntry)
+		}
+		s.assetCache[id] = cachedAssetEntry{
+			asset:     asset,
+			expiresAt: now.Add(metaCacheTTL),
+		}
+		s.cacheMu.Unlock()
+	}
+	return asset, nil
+}
+
+func (s *Service) getChunksCached(ctx context.Context, id string) ([]Chunk, error) {
+	now := time.Now()
+	s.cacheMu.RLock()
+	if entry, ok := s.chunksCache[id]; ok && now.Before(entry.expiresAt) {
+		s.cacheMu.RUnlock()
+		return entry.chunks, nil
+	}
+	s.cacheMu.RUnlock()
+
+	chunks, err := s.repo.GetChunks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	if len(s.chunksCache) > 2048 {
+		s.chunksCache = make(map[string]cachedChunksEntry)
+	}
+	s.chunksCache[id] = cachedChunksEntry{
+		chunks:    chunks,
+		expiresAt: now.Add(metaCacheTTL),
+	}
+	s.cacheMu.Unlock()
+	return chunks, nil
+}
+
+func (s *Service) resolveAccessCached(ctx context.Context, p provider.StorageProvider, fileID string, bucketOrChat *string, isOverride bool) (provider.AccessResult, error) {
+	if !isOverride {
+		cacheKey := p.Name() + ":" + fileID
+		now := time.Now()
+		s.cacheMu.RLock()
+		if entry, ok := s.accessCache[cacheKey]; ok && now.Before(entry.expiresAt) {
+			s.cacheMu.RUnlock()
+			return entry.result, nil
+		}
+		s.cacheMu.RUnlock()
+
+		res, err := p.GetAccess(ctx, fileID, bucketOrChat)
+		if err != nil {
+			return provider.AccessResult{}, err
+		}
+		s.cacheMu.Lock()
+		if len(s.accessCache) > 8192 {
+			s.accessCache = make(map[string]cachedAccessEntry)
+		}
+		s.accessCache[cacheKey] = cachedAccessEntry{
+			result:    res,
+			expiresAt: time.Now().Add(accessCacheTTL),
+		}
+		s.cacheMu.Unlock()
+		return res, nil
+	}
+	return p.GetAccess(ctx, fileID, bucketOrChat)
+}
+
+func (s *Service) invalidateAssetCache(id string) {
+	s.cacheMu.Lock()
+	delete(s.assetCache, id)
+	delete(s.chunksCache, id)
+	s.cacheMu.Unlock()
 }
 
 func (s *Service) List(ctx context.Context, filter ListFilter) ([]Asset, int, error) {
@@ -432,7 +583,7 @@ func (s *Service) GetUsages(ctx context.Context, onlyPublic bool, privateRules [
 }
 
 func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, error) {
-	asset, err := s.repo.GetByID(ctx, id)
+	asset, err := s.GetMeta(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -446,7 +597,7 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 	if !ok {
 		return "", fmt.Errorf("provider %q: %w", asset.Provider, ErrProviderDisabled)
 	}
-	result, err := p.GetAccess(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+	result, err := s.resolveAccessCached(ctx, p, asset.ProviderFileID, asset.ProviderBucketOrChat, false)
 	if err != nil {
 		return "", err
 	}
@@ -454,19 +605,22 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 }
 
 type StreamInfo struct {
-	IsChunked  bool              `json:"isChunked"`
-	StreamURL  string            `json:"streamUrl,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	TotalBytes int64             `json:"totalBytes"`
-	MIMEType   string            `json:"mimeType"`
-	ChunkCount int               `json:"chunkCount,omitempty"`
-	ChunkURLs  []string          `json:"chunkUrls,omitempty"`
-	ChunkSize  int64             `json:"chunkSize,omitempty"`
+	IsChunked    bool                                                              `json:"isChunked"`
+	StreamURL    string                                                            `json:"streamUrl,omitempty"`
+	Headers      map[string]string                                                 `json:"headers,omitempty"`
+	TotalBytes   int64                                                             `json:"totalBytes"`
+	MIMEType     string                                                            `json:"mimeType"`
+	ChunkCount   int                                                               `json:"chunkCount,omitempty"`
+	ChunkURLs    []string                                                          `json:"chunkUrls,omitempty"`
+	ChunkSize    int64                                                             `json:"chunkSize,omitempty"`
+	ResolveChunk func(ctx context.Context, chunkIndex int) (string, map[string]string, error) `json:"-"`
 }
 
-// StreamAsset returns stream URLs for an asset
+// StreamAsset returns stream info and an on-demand chunk URL resolver for an asset.
+// By resolving chunk URLs lazily per requested byte range and caching them in memory,
+// video Range requests only touch the exact chunks needed (1 chunk instead of N).
 func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider provider.StorageProvider) (StreamInfo, error) {
-	asset, err := s.repo.GetByID(ctx, id)
+	asset, err := s.GetMeta(ctx, id)
 	if err != nil {
 		return StreamInfo{}, err
 	}
@@ -474,6 +628,7 @@ func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider p
 		return StreamInfo{}, ErrNotFound
 	}
 
+	isOverride := overrideProvider != nil
 	p := overrideProvider
 	if p == nil {
 		var ok bool
@@ -484,7 +639,7 @@ func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider p
 	}
 
 	if !asset.IsChunked {
-		result, err := p.GetAccess(ctx, asset.ProviderFileID, asset.ProviderBucketOrChat)
+		result, err := s.resolveAccessCached(ctx, p, asset.ProviderFileID, asset.ProviderBucketOrChat, isOverride)
 		if err != nil {
 			return StreamInfo{}, err
 		}
@@ -506,79 +661,40 @@ func (s *Service) StreamAsset(ctx context.Context, id string, overrideProvider p
 		}, nil
 	}
 
-	// Chunked file - get chunks then resolve URLs
-	chunks, err := s.repo.GetChunks(ctx, id)
+	// Chunked file - fetch chunk records (cached) and provide lazy per-chunk resolver
+	chunks, err := s.getChunksCached(ctx, id)
 	if err != nil {
 		return StreamInfo{}, fmt.Errorf("get chunks: %w", err)
 	}
 
-	chunkURLs := make([]string, len(chunks))
-	var headers map[string]string
-	var headersMu sync.Mutex
-
-	type chunkAccessResult struct {
-		index  int
-		url    string
-		header http.Header
-		err    error
-	}
-
-	resCh := make(chan chunkAccessResult, len(chunks))
-	sem := make(chan struct{}, 5) // max 5 concurrent requests to TG
-
-	for i, c := range chunks {
-		go func(idx int, ch Chunk) {
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				resCh <- chunkAccessResult{index: idx, err: ctx.Err()}
-				return
-			}
-
-			cr, err := p.GetAccess(ctx, ch.ChunkFileID, asset.ProviderBucketOrChat)
-			if err != nil {
-				resCh <- chunkAccessResult{index: idx, err: err}
-				return
-			}
-
-			resCh <- chunkAccessResult{index: idx, url: cr.URL, header: cr.Header}
-		}(i, c)
-	}
-
-	var firstAccessErr error
-	for range chunks {
-		res := <-resCh
-		if res.err != nil && firstAccessErr == nil {
-			firstAccessErr = res.err
+	bucketOrChat := asset.ProviderBucketOrChat
+	resolveChunk := func(reqCtx context.Context, chunkIndex int) (string, map[string]string, error) {
+		if chunkIndex < 0 || chunkIndex >= len(chunks) {
+			return "", nil, fmt.Errorf("chunk index %d out of bounds [0, %d)", chunkIndex, len(chunks))
 		}
-		if res.err == nil {
-			chunkURLs[res.index] = res.url
-			headersMu.Lock()
-			if headers == nil && len(res.header) > 0 {
-				headers = make(map[string]string)
-				for k, vs := range res.header {
-					if len(vs) > 0 {
-						headers[k] = vs[0]
-					}
+		cr, err := s.resolveAccessCached(reqCtx, p, chunks[chunkIndex].ChunkFileID, bucketOrChat, isOverride)
+		if err != nil {
+			return "", nil, err
+		}
+		var hdrs map[string]string
+		if len(cr.Header) > 0 {
+			hdrs = make(map[string]string, len(cr.Header))
+			for k, vs := range cr.Header {
+				if len(vs) > 0 {
+					hdrs[k] = vs[0]
 				}
 			}
-			headersMu.Unlock()
 		}
-	}
-
-	if firstAccessErr != nil {
-		return StreamInfo{}, fmt.Errorf("get chunk URL failed: %w", firstAccessErr)
+		return cr.URL, hdrs, nil
 	}
 
 	return StreamInfo{
-		IsChunked:  true,
-		TotalBytes: asset.SizeBytes,
-		MIMEType:   asset.MIMEType,
-		ChunkCount: len(chunkURLs),
-		ChunkURLs:  chunkURLs,
-		Headers:    headers,
-		ChunkSize:  deduceChunkSize(asset.SizeBytes, len(chunkURLs)),
+		IsChunked:    true,
+		TotalBytes:   asset.SizeBytes,
+		MIMEType:     asset.MIMEType,
+		ChunkCount:   len(chunks),
+		ChunkSize:    deduceChunkSize(asset.SizeBytes, len(chunks)),
+		ResolveChunk: resolveChunk,
 	}, nil
 }
 
@@ -632,7 +748,325 @@ func (s *Service) Delete(ctx context.Context, id string, overrideProvider provid
 		}
 	}
 
+	s.invalidateAssetCache(id)
 	return s.repo.MarkDeleted(ctx, id)
+}
+
+func (s *Service) cleanupExpiredSessionsLocked() {
+	now := time.Now()
+	for id, sess := range s.uploadSessions {
+		if now.Sub(sess.createdAt) > sessionExpireTTL {
+			_ = sess.tmpFile.Close()
+			_ = os.Remove(sess.tmpFile.Name())
+			delete(s.uploadSessions, id)
+		}
+	}
+}
+
+func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (InitUploadOutput, error) {
+	project := strings.TrimSpace(in.Project)
+	if project == "" {
+		return InitUploadOutput{}, fmt.Errorf("project is required")
+	}
+	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
+	if !validUsages[in.Usage] {
+		return InitUploadOutput{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
+	}
+	fileName := strings.TrimSpace(in.FileName)
+	if fileName == "" {
+		return InitUploadOutput{}, fmt.Errorf("file name is required")
+	}
+	if in.SizeBytes <= 0 {
+		return InitUploadOutput{}, fmt.Errorf("sizeBytes must be positive")
+	}
+	if in.SizeBytes > maxVideoSizeBytes {
+		return InitUploadOutput{}, fmt.Errorf("file exceeds %d bytes: %w", maxVideoSizeBytes, ErrFileTooLarge)
+	}
+
+	// Instant deduplication pre-check if client provided SHA-256
+	shaHex := strings.ToLower(strings.TrimSpace(in.SHA256))
+	if len(shaHex) == 64 {
+		if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
+			assetID := newUUID()
+			ext := extByMIME(existingAsset.MIMEType)
+			publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
+			asset, err := s.repo.Create(ctx, CreateAssetInput{
+				ID:                   assetID,
+				Provider:             existingAsset.Provider,
+				ProviderFileID:       existingAsset.ProviderFileID,
+				ProviderBucketOrChat: existingAsset.ProviderBucketOrChat,
+				PublicURL:            publicURL,
+				MIMEType:             existingAsset.MIMEType,
+				SizeBytes:            existingAsset.SizeBytes,
+				SHA256:               &shaHex,
+				Project:              project,
+				Usage:                in.Usage,
+				IsChunked:            existingAsset.IsChunked,
+			})
+			if err != nil {
+				return InitUploadOutput{}, fmt.Errorf("duplicate asset metadata creation failed: %w", err)
+			}
+			if existingAsset.IsChunked {
+				chunks, err := s.repo.GetChunks(ctx, existingAsset.ID)
+				if err != nil {
+					return InitUploadOutput{}, fmt.Errorf("duplicate asset get chunks failed: %w", err)
+				}
+				newChunks := make([]Chunk, len(chunks))
+				for i, c := range chunks {
+					newChunks[i] = Chunk{
+						AssetID:     assetID,
+						ChunkIndex:  c.ChunkIndex,
+						ChunkFileID: c.ChunkFileID,
+					}
+				}
+				if err := s.repo.SaveChunks(ctx, assetID, newChunks); err != nil {
+					return InitUploadOutput{}, fmt.Errorf("duplicate asset save chunks failed: %w", err)
+				}
+			}
+			return InitUploadOutput{
+				Duplicated: true,
+				Asset:      &asset,
+			}, nil
+		}
+	}
+
+	tmpFile, err := os.CreateTemp("", "media-session-*")
+	if err != nil {
+		return InitUploadOutput{}, fmt.Errorf("create upload session file: %w", err)
+	}
+
+	totalChunks := int((in.SizeBytes + chunkSize - 1) / chunkSize)
+	if totalChunks <= 0 {
+		totalChunks = 1
+	}
+
+	uploadID := newUUID()
+	sess := &uploadSession{
+		id:           uploadID,
+		project:      project,
+		usage:        in.Usage,
+		fileName:     fileName,
+		declaredMIME: in.DeclaredMIMEType,
+		sizeBytes:    in.SizeBytes,
+		totalChunks:  totalChunks,
+		tmpFile:      tmpFile,
+		received:     make(map[int]bool, totalChunks),
+		createdAt:    time.Now(),
+	}
+
+	s.sessionsMu.Lock()
+	s.cleanupExpiredSessionsLocked()
+	s.uploadSessions[uploadID] = sess
+	s.sessionsMu.Unlock()
+
+	return InitUploadOutput{
+		Duplicated:  false,
+		UploadID:    uploadID,
+		ChunkSize:   chunkSize,
+		TotalChunks: totalChunks,
+	}, nil
+}
+
+func (s *Service) WriteUploadChunk(_ context.Context, uploadID string, chunkIndex int, src io.Reader) (int, int, error) {
+	s.sessionsMu.Lock()
+	sess, ok := s.uploadSessions[uploadID]
+	s.sessionsMu.Unlock()
+	if !ok {
+		return 0, 0, ErrNotFound
+	}
+
+	if chunkIndex < 0 || chunkIndex >= sess.totalChunks {
+		return 0, 0, fmt.Errorf("chunkIndex %d out of range [0, %d)", chunkIndex, sess.totalChunks)
+	}
+
+	startOffset := int64(chunkIndex) * chunkSize
+	expectedMax := chunkSize
+	if startOffset+expectedMax > sess.sizeBytes {
+		expectedMax = sess.sizeBytes - startOffset
+	}
+
+	buf := make([]byte, 256*1024)
+	var written int64
+	var sniffHead []byte
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if written+int64(n) > expectedMax {
+				return 0, 0, ErrFileTooLarge
+			}
+			if chunkIndex == 0 && len(sniffHead) < 512 {
+				need := 512 - len(sniffHead)
+				if need > n {
+					need = n
+				}
+				sniffHead = append(sniffHead, buf[:need]...)
+			}
+			if _, wErr := sess.tmpFile.WriteAt(buf[:n], startOffset+written); wErr != nil {
+				return 0, 0, fmt.Errorf("write chunk at offset: %w", wErr)
+			}
+			written += int64(n)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return 0, 0, fmt.Errorf("read chunk stream: %w", readErr)
+		}
+	}
+
+	sess.mu.Lock()
+	if chunkIndex == 0 && len(sniffHead) > 0 {
+		sess.sniff = sniffHead
+	}
+	sess.received[chunkIndex] = true
+	receivedCount := len(sess.received)
+	totalChunks := sess.totalChunks
+	sess.mu.Unlock()
+
+	return receivedCount, totalChunks, nil
+}
+
+func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, overrideProvider provider.StorageProvider) (Asset, error) {
+	s.sessionsMu.Lock()
+	sess, ok := s.uploadSessions[uploadID]
+	if ok {
+		delete(s.uploadSessions, uploadID)
+	}
+	s.sessionsMu.Unlock()
+	if !ok {
+		return Asset{}, ErrNotFound
+	}
+
+	tmpFile := sess.tmpFile
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	sess.mu.Lock()
+	if len(sess.received) < sess.totalChunks {
+		sess.mu.Unlock()
+		return Asset{}, fmt.Errorf("upload incomplete: received %d/%d chunks", len(sess.received), sess.totalChunks)
+	}
+	sniff := sess.sniff
+	sess.mu.Unlock()
+
+	p := overrideProvider
+	if p == nil {
+		var okProv bool
+		p, okProv = s.providers[s.defaultProvider]
+		if !okProv {
+			return Asset{}, fmt.Errorf("provider %q: %w", s.defaultProvider, ErrProviderDisabled)
+		}
+	}
+
+	mimeType, mediaKind, err := normalizeAndValidateMIME(sess.fileName, sess.declaredMIME, sniff)
+	if err != nil {
+		return Asset{}, err
+	}
+
+	sizeBytes := sess.sizeBytes
+	if mediaKind == "image" {
+		if mimeType != "image/svg+xml" && sizeBytes < minImageSizeBytes {
+			return Asset{}, fmt.Errorf("image file too small (%d bytes, min %d bytes required), empty or 1x1 dummy placeholders are rejected: %w", sizeBytes, minImageSizeBytes, ErrInvalidFileType)
+		}
+		if sizeBytes > maxImageSizeBytes {
+			return Asset{}, fmt.Errorf("image exceeds %d bytes: %w", maxImageSizeBytes, ErrFileTooLarge)
+		}
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return Asset{}, fmt.Errorf("seek tmpFile failed: %w", err)
+		}
+		if cfg, _, err := image.DecodeConfig(tmpFile); err == nil {
+			if cfg.Width <= 1 && cfg.Height <= 1 {
+				return Asset{}, fmt.Errorf("image dimensions too small (%dx%d), 1x1 dummy placeholders are rejected: %w", cfg.Width, cfg.Height, ErrInvalidFileType)
+			}
+		}
+	}
+	if mediaKind == "video" && sizeBytes > maxVideoSizeBytes {
+		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytes, ErrFileTooLarge)
+	}
+	if mediaKind == "audio" && sizeBytes > maxAudioSizeBytes {
+		return Asset{}, fmt.Errorf("audio exceeds %d bytes: %w", maxAudioSizeBytes, ErrFileTooLarge)
+	}
+	if mediaKind == "file" && sizeBytes > maxFileSizeBytes {
+		return Asset{}, fmt.Errorf("file exceeds %d bytes: %w", maxFileSizeBytes, ErrFileTooLarge)
+	}
+
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return Asset{}, fmt.Errorf("rewind session file: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.CopyBuffer(h, io.LimitReader(tmpFile, sizeBytes), make([]byte, 256*1024)); err != nil {
+		return Asset{}, fmt.Errorf("hash session file: %w", err)
+	}
+	shaHex := hex.EncodeToString(h.Sum(nil))
+
+	if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
+		assetID := newUUID()
+		ext := extByMIME(mimeType)
+		publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
+		asset, err := s.repo.Create(ctx, CreateAssetInput{
+			ID:                   assetID,
+			Provider:             existingAsset.Provider,
+			ProviderFileID:       existingAsset.ProviderFileID,
+			ProviderBucketOrChat: existingAsset.ProviderBucketOrChat,
+			PublicURL:            publicURL,
+			MIMEType:             mimeType,
+			SizeBytes:            sizeBytes,
+			SHA256:               &shaHex,
+			Project:              sess.project,
+			Usage:                sess.usage,
+			IsChunked:            existingAsset.IsChunked,
+		})
+		if err != nil {
+			return Asset{}, fmt.Errorf("duplicate asset metadata creation failed: %w", err)
+		}
+		if existingAsset.IsChunked {
+			chunks, err := s.repo.GetChunks(ctx, existingAsset.ID)
+			if err != nil {
+				return Asset{}, fmt.Errorf("duplicate asset get chunks failed: %w", err)
+			}
+			newChunks := make([]Chunk, len(chunks))
+			for i, c := range chunks {
+				newChunks[i] = Chunk{
+					AssetID:     assetID,
+					ChunkIndex:  c.ChunkIndex,
+					ChunkFileID: c.ChunkFileID,
+				}
+			}
+			if err := s.repo.SaveChunks(ctx, assetID, newChunks); err != nil {
+				return Asset{}, fmt.Errorf("duplicate asset save chunks failed: %w", err)
+			}
+		}
+		return asset, nil
+	}
+
+	if mediaKind == "video" && mimeType == "video/mp4" {
+		if fsFile, err := fastStartMP4(tmpFile); err != nil {
+			log.Printf("mp4 faststart failed, using original file: %v", err)
+		} else if fsFile != tmpFile {
+			defer os.Remove(fsFile.Name())
+			defer fsFile.Close()
+			if st, statErr := fsFile.Stat(); statErr == nil && st.Size() > 0 {
+				sizeBytes = st.Size()
+			}
+			tmpFile = fsFile
+		}
+	}
+
+	upReq := UploadRequest{
+		Project:             sess.project,
+		Usage:               sess.usage,
+		FileName:            sess.fileName,
+		DeclaredContentType: sess.declaredMIME,
+		OverrideProvider:    overrideProvider,
+	}
+
+	if sizeBytes <= chunkSize {
+		return s.uploadSingle(ctx, p, tmpFile, upReq, mimeType, sizeBytes, shaHex)
+	}
+	return s.uploadChunked(ctx, p, tmpFile, upReq, mimeType, sizeBytes, shaHex)
 }
 
 func persistUpload(src io.Reader) (*os.File, int64, string, []byte, error) {
@@ -642,7 +1076,7 @@ func persistUpload(src io.Reader) (*os.File, int64, string, []byte, error) {
 	}
 
 	h := sha256.New()
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, 256*1024)
 	sniff := make([]byte, 0, 512)
 	var total int64
 
