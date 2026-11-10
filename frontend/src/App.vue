@@ -188,6 +188,11 @@ onUnmounted(() => {
   <!-- Main M3 Layout -->
   <div class="app-layout">
     
+    <!-- Navigation Drawer Backdrop -->
+    <Transition name="drawer-fade">
+      <div v-if="drawerOpen && isLoggedIn" class="drawer-backdrop" @click="drawerOpen = false"></div>
+    </Transition>
+
     <!-- Navigation Drawer -->
     <nav v-if="isLoggedIn" :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
       <div class="nav-brand" @click="switchTab('gallery')" style="cursor: pointer;">
@@ -239,16 +244,16 @@ onUnmounted(() => {
       
       <!-- Top App Bar Header -->
       <header class="top-app-bar">
-        <div style="display: flex; align-items: center; gap: 16px;">
-          <button v-if="isLoggedIn" class="menu-toggle" @click="toggleDrawer">
+        <div class="top-app-bar-left">
+          <button v-if="isLoggedIn" class="menu-toggle" @click="toggleDrawer" aria-label="切换菜单">
             <span class="material-symbols-rounded" style="font-size: 28px;">menu</span>
           </button>
           
           <div v-if="!isLoggedIn" class="guest-brand" @click="switchTab('gallery')" style="cursor: pointer; display: flex; align-items: center; gap: 12px;">
-            <div class="logo-wrapper" style="width: 32px; height: 32px; position: relative;">
+            <div class="logo-wrapper" style="width: 32px; height: 32px; position: relative; flex-shrink: 0;">
               <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" style="width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.4));" />
             </div>
-            <h1 style="font-size: 18px; font-weight: 700; background: linear-gradient(135deg, hsl(var(--md-sys-color-primary)), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Firefly Nest</h1>
+            <h1 class="guest-brand-title" style="font-size: 18px; font-weight: 700; background: linear-gradient(135deg, hsl(var(--md-sys-color-primary)), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; white-space: nowrap;">Firefly Nest</h1>
           </div>
 
           <div v-else class="page-title" id="pageTitle">
@@ -269,21 +274,21 @@ onUnmounted(() => {
             <span class="material-symbols-rounded" style="font-size: 16px;">
               {{ isWorkerMode ? 'cloud' : 'bolt' }}
             </span>
-            <span>{{ isWorkerMode ? activeWorkerName : '直连 TG 模式' }}</span>
+            <span class="mode-badge-label">{{ isWorkerMode ? activeWorkerName : '直连 TG 模式' }}</span>
           </div>
 
-          <button v-if="isLoggedIn" :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown">
+          <button v-if="isLoggedIn" :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown" title="网关连接配置" aria-label="网关连接配置">
             <span class="material-symbols-rounded" style="font-size: 18px;">settings</span>
-            <span>网关连接配置</span>
+            <span class="config-trigger-label">网关连接配置</span>
           </button>
 
           <button v-if="!isLoggedIn && activeTab !== 'login'" class="m3-btn m3-btn-primary m3-btn-sm" @click="switchTab('login')">
             <span class="material-symbols-rounded" style="font-size: 16px;">login</span>
-            <span>登录后台</span>
+            <span class="login-btn-label">登录后台</span>
           </button>
           
           <!-- Quick Config dropdown panel -->
-          <div :class="['config-dropdown', { active: configOpen }]" id="configDropdown" style="width: 340px;">
+          <div :class="['config-dropdown', { active: configOpen }]" id="configDropdown">
             <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 6px; color: #fff;">全局连接配置</h3>
             <div class="form-field">
               <label>API 基础地址</label>
@@ -323,6 +328,35 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.drawer-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 95;
+}
+
+.drawer-fade-enter-active,
+.drawer-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.drawer-fade-enter-from,
+.drawer-fade-leave-to {
+  opacity: 0;
+}
+
+.top-app-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
 .mode-badge-btn {
   display: flex;
   align-items: center;

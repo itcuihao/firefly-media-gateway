@@ -680,6 +680,9 @@ onMounted(() => {
     </div>
 
     <!-- Detail Drawer Panel (Sheet) -->
+    <Transition name="fade">
+      <div v-if="sheetActive" class="sheet-backdrop" @click="closeDetailSheet"></div>
+    </Transition>
     <div :class="['m3-sheet', { active: sheetActive }]" id="detailSheet">
       <div class="m3-sheet-header">
         <h3 style="font-size: 18px; font-weight: 600; color: #fff;">📁 媒体资源元数据</h3>
