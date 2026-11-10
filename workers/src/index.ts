@@ -460,7 +460,7 @@ async function findBotForFile(
 /**
  * 获取文件访问 URL
  */
-async function handleGetFile(request: Request, env: Env): Promise<Response> {
+async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const fileId = url.searchParams.get('file_id');
   const debugMode = url.searchParams.get('debug') === 'true';
@@ -513,8 +513,23 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  if (!fileId) {
-    return error('file_id is required', 'MISSING_FILE_ID', 400);
+  // 边缘缓存检查 (仅对非 private 且非 debug 请求启用)
+  const cache = typeof caches !== 'undefined' ? ((caches as any).default as Cache | undefined) : null;
+  const cacheKey = new Request(url.toString(), { method: 'GET' });
+  if (cache && !isPrivate && !debugMode) {
+    try {
+      const cached = await cache.match(cacheKey);
+      if (cached) {
+        const hitHeaders = new Headers(cached.headers);
+        hitHeaders.set('X-Cache-Status', 'HIT');
+        return new Response(cached.body, {
+          status: cached.status,
+          headers: hitHeaders,
+        });
+      }
+    } catch (e) {
+      console.warn('Cache match error:', e);
+    }
   }
 
   const botConfigs = parseBotConfig(env);
@@ -577,7 +592,20 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
       resp.tg_url = `https://api.telegram.org/file/bot${botConfig.token}/${filePath}`;
     }
 
-    return jsonResponse(resp);
+    const extraHeaders: Record<string, string> = {};
+    if (!isPrivate && !debugMode) {
+      extraHeaders['Cache-Control'] = 'public, max-age=86400';
+      extraHeaders['X-Cache-Status'] = 'MISS';
+    } else {
+      extraHeaders['Cache-Control'] = 'private, no-cache';
+      extraHeaders['X-Cache-Status'] = 'BYPASS';
+    }
+
+    const res = jsonResponse(resp, 200, extraHeaders);
+    if (cache && !isPrivate && !debugMode && ctx && ctx.waitUntil) {
+      ctx.waitUntil(cache.put(cacheKey, res.clone()).catch((err: unknown) => console.warn('Cache put error:', err)));
+    }
+    return res;
   } catch (e) {
     return error(
       `Get file failed: ${e instanceof Error ? e.message : 'Unknown error'}`,
@@ -588,9 +616,9 @@ async function handleGetFile(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * 流式文件下载（代理 Telegram 文件，支持 Range 请求）
+ * 流式文件下载（代理 Telegram 文件，支持 Range 请求与 Edge 缓存）
  */
-async function handleStreamFile(request: Request, env: Env): Promise<Response> {
+async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const fileId = url.searchParams.get('file_id');
 
@@ -642,8 +670,25 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  if (!fileId) {
-    return error('file_id is required', 'MISSING_FILE_ID', 400);
+  // 边缘缓存检查 (仅对非 private 且非 Range 请求启用)
+  const rangeHeader = request.headers.get('Range');
+  const cache = typeof caches !== 'undefined' ? ((caches as any).default as Cache | undefined) : null;
+  const cacheKey = new Request(url.toString(), { method: 'GET' });
+
+  if (cache && !isPrivate && !rangeHeader) {
+    try {
+      const cached = await cache.match(cacheKey);
+      if (cached) {
+        const hitHeaders = new Headers(cached.headers);
+        hitHeaders.set('X-Cache-Status', 'HIT');
+        return new Response(cached.body, {
+          status: cached.status,
+          headers: hitHeaders,
+        });
+      }
+    } catch (e) {
+      console.warn('Cache match error:', e);
+    }
   }
 
   const botConfigs = parseBotConfig(env);
@@ -698,7 +743,6 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     const headers = new Headers();
 
     // 转发 Range 头（支持视频进度条）
-    const rangeHeader = request.headers.get('Range');
     if (rangeHeader) {
       headers.set('Range', rangeHeader);
     }
@@ -726,7 +770,13 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     }
 
     responseHeaders.set('Accept-Ranges', 'bytes');
-    responseHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
+    if (isPrivate) {
+      responseHeaders.set('Cache-Control', 'private, no-cache');
+      responseHeaders.set('X-Cache-Status', 'BYPASS');
+    } else {
+      responseHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
+      responseHeaders.set('X-Cache-Status', rangeHeader ? 'BYPASS' : 'MISS');
+    }
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('X-Served-By-Bot', botName || '');
 
@@ -737,10 +787,17 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     // 返回状态码（Range 请求返回 206）
     const status = rangeHeader && fileResp.status === 206 ? 206 : fileResp.status;
 
-    return new Response(fileResp.body, {
+    const responseToReturn = new Response(fileResp.body, {
       status,
       headers: responseHeaders,
     });
+
+    // 缓存不可变的公共非 Range 200 响应到 Cloudflare 全球边缘
+    if (cache && !isPrivate && !rangeHeader && fileResp.status === 200 && ctx && ctx.waitUntil) {
+      ctx.waitUntil(cache.put(cacheKey, responseToReturn.clone()).catch((e: unknown) => console.warn('Cache put error:', e)));
+    }
+
+    return responseToReturn;
 
   } catch (e) {
     return error(
@@ -766,13 +823,17 @@ function handleHealthCheck(): Response {
 /**
  * 返回 JSON 响应
  */
-function jsonResponse(data: unknown, status = 200): Response {
+function jsonResponse(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  });
+  for (const [k, v] of Object.entries(extraHeaders)) {
+    headers.set(k, v);
+  }
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    },
+    headers,
   });
 }
 
@@ -840,8 +901,8 @@ router
   .get('/', () => handleHealthCheck())
   .get('/health', () => handleHealthCheck())
   .post('/upload', (request, env) => handleUpload(request, env))
-  .get('/get', (request, env) => handleGetFile(request, env))
-  .get('/stream', (request, env) => handleStreamFile(request, env))
+  .get('/get', (request, env, ctx) => handleGetFile(request, env, ctx))
+  .get('/stream', (request, env, ctx) => handleStreamFile(request, env, ctx))
   .delete('/delete', (request, env) => handleDeleteFile(request, env))
   .post('/delete', (request, env) => handleDeleteFile(request, env));
 

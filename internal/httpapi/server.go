@@ -44,9 +44,28 @@ type Server struct {
 	commit           string
 	logger           *log.Logger
 	sf               singleflight.Group
+	diskCache        *DiskCache
 }
 
 func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode, commit string, logger *log.Logger) *Server {
+	cacheDir := os.Getenv("CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = "data/cache"
+	}
+	cacheMaxGB := 20
+	if v := os.Getenv("CACHE_MAX_GB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cacheMaxGB = n
+		}
+	}
+	cacheMaxBytes := int64(cacheMaxGB) * 1024 * 1024 * 1024
+	if v := os.Getenv("CACHE_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cacheMaxBytes = n
+		}
+	}
+	dc, _ := NewDiskCache(cacheDir, cacheMaxBytes, logger)
+
 	return &Server{
 		svc:              svc,
 		authToken:        authToken,
@@ -59,7 +78,13 @@ func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, w
 		storageMode:      storageMode,
 		commit:           commit,
 		logger:           logger,
+		diskCache:        dc,
 	}
+}
+
+// SetDiskCache overrides the server's disk cache (useful for testing or custom configuration).
+func (s *Server) SetDiskCache(dc *DiskCache) {
+	s.diskCache = dc
 }
 
 func (s *Server) Handler() http.Handler {
@@ -258,7 +283,7 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if streamInfo.IsChunked {
-		s.proxyChunkedMedia(w, r, streamInfo)
+		s.proxyChunkedMedia(w, r, streamInfo, mediaID)
 		return
 	}
 
@@ -268,7 +293,7 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.proxySingleMedia(w, r, streamInfo)
+	s.proxySingleMedia(w, r, streamInfo, mediaID)
 }
 
 func clientAcceptsWebP(r *http.Request) bool {
@@ -286,6 +311,9 @@ func isCompressibleImage(mime string) bool {
 
 func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, mediaID string, streamInfo media.StreamInfo) bool {
 	cacheDir := "data/cache"
+	if s.diskCache != nil {
+		cacheDir = s.diskCache.Dir()
+	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		s.logger.Printf("[WEBP] failed to create cache directory: %v", err)
 		return false
@@ -296,6 +324,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	// If cache already exists, serve immediately
 	if _, err := os.Stat(cachePath); err == nil {
 		s.logger.Printf("[WEBP] serving cached WebP for %q", mediaID)
+		_ = os.Chtimes(cachePath, time.Now(), time.Now())
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -307,6 +336,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	_, sfErr, _ := s.sf.Do("webp:"+mediaID, func() (any, error) {
 		// Double-check inside singleflight lock
 		if _, err := os.Stat(cachePath); err == nil {
+			_ = os.Chtimes(cachePath, time.Now(), time.Now())
 			return cachePath, nil
 		}
 
@@ -357,6 +387,11 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 			return nil, fmt.Errorf("save cache file: %w", err)
 		}
 
+		_ = os.Chtimes(cachePath, time.Now(), time.Now())
+		if s.diskCache != nil {
+			s.diskCache.TriggerEviction()
+		}
+
 		s.logger.Printf("[WEBP] successfully created cache for %q", mediaID)
 		return cachePath, nil
 	})
@@ -377,7 +412,36 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	return false
 }
 
-func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
+func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string) {
+	// Attempt to serve from disk cache if file size is known and within reasonable bounds (<= 100MB)
+	if s.diskCache != nil && streamInfo.TotalBytes > 0 && streamInfo.TotalBytes <= 100*1024*1024 {
+		fileKey := fmt.Sprintf("%s.bin", mediaID)
+		filePath, err := s.diskCache.GetOrFetchFile(r.Context(), fileKey, streamInfo.TotalBytes, streamInfo.StreamURL, streamInfo.Headers)
+		if err == nil {
+			f, err := os.Open(filePath)
+			if err == nil {
+				defer f.Close()
+				if streamInfo.MIMEType != "" {
+					w.Header().Set("Content-Type", streamInfo.MIMEType)
+				}
+				if w.Header().Get("Accept-Ranges") == "" {
+					w.Header().Set("Accept-Ranges", "bytes")
+				}
+				if w.Header().Get("Cache-Control") == "" {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
+				fi, _ := f.Stat()
+				var modTime time.Time
+				if fi != nil {
+					modTime = fi.ModTime()
+				}
+				http.ServeContent(w, r, mediaID, modTime, f)
+				return
+			}
+		}
+	}
+
+	// Live streaming proxy fallback
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, streamInfo.StreamURL, nil)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "failed to build media request", err)
@@ -415,7 +479,7 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	}
 }
 
-func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
+func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string) {
 	chunkSize := streamInfo.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = 15 * 1024 * 1024 // Fallback default chunk size
@@ -481,52 +545,88 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 			relativeEnd = chunkSizeBytes - 1
 		}
 
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, chunkURL, nil)
+		chunkKey := fmt.Sprintf("%s_%d.bin", mediaID, i)
+		var chunkPath string
+		var err error
+		if s.diskCache != nil {
+			chunkPath, err = s.diskCache.GetOrFetchChunk(r.Context(), chunkKey, chunkSizeBytes, chunkURL, streamInfo.Headers)
+		} else {
+			err = errors.New("disk cache disabled")
+		}
+
 		if err != nil {
-			s.logger.Printf("[WARN]  build chunk request failed: %v", err)
-			return
-		}
-		for k, v := range streamInfo.Headers {
-			req.Header.Set(k, v)
-		}
-		// Request the specific range from the storage provider
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", relativeStart, relativeEnd))
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			s.logger.Printf("[WARN]  fetch chunk range failed: %v", err)
-			return
-		}
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			s.logger.Printf("[WARN]  fetch chunk returned status=%d", resp.StatusCode)
-			return
-		}
-
-		var bodyReader io.Reader = resp.Body
-		if resp.StatusCode == http.StatusOK && isRange {
-			// Upstream returned the full chunk instead of 206 Partial Content;
-			// slice the requested byte range locally.
-			if relativeStart > 0 {
-				if _, err := io.CopyN(io.Discard, resp.Body, relativeStart); err != nil {
-					resp.Body.Close()
-					s.logger.Printf("[WARN]  skip to chunk start failed: %v", err)
-					return
-				}
+			s.logger.Printf("[WARN] disk cache miss/fetch failed for chunk %d: %v, falling back to direct stream", i, err)
+			if !s.streamChunkDirect(w, r, chunkURL, streamInfo.Headers, relativeStart, relativeEnd, isRange) {
+				return
 			}
-			neededBytes := relativeEnd - relativeStart + 1
-			bodyReader = io.LimitReader(resp.Body, neededBytes)
+			continue
 		}
 
-		_, copyErr := io.Copy(w, bodyReader)
-		resp.Body.Close()
+		f, err := os.Open(chunkPath)
+		if err != nil {
+			s.logger.Printf("[WARN] open cached chunk %d failed: %v, falling back to direct stream", i, err)
+			if !s.streamChunkDirect(w, r, chunkURL, streamInfo.Headers, relativeStart, relativeEnd, isRange) {
+				return
+			}
+			continue
+		}
 
+		if _, err := f.Seek(relativeStart, io.SeekStart); err != nil {
+			f.Close()
+			s.logger.Printf("[WARN] seek cached chunk %d failed: %v", i, err)
+			return
+		}
+
+		neededBytes := relativeEnd - relativeStart + 1
+		_, copyErr := io.CopyN(w, f, neededBytes)
+		f.Close()
 		if copyErr != nil {
-			s.logger.Printf("[WARN]  write chunk failed: %v", copyErr)
+			s.logger.Printf("[WARN] write chunk %d failed: %v", i, copyErr)
 			return
 		}
 	}
+}
+
+func (s *Server) streamChunkDirect(w http.ResponseWriter, r *http.Request, chunkURL string, headers map[string]string, relativeStart, relativeEnd int64, isRange bool) bool {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, chunkURL, nil)
+	if err != nil {
+		s.logger.Printf("[WARN] build chunk request failed: %v", err)
+		return false
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", relativeStart, relativeEnd))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.logger.Printf("[WARN] fetch chunk range failed: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		s.logger.Printf("[WARN] fetch chunk returned status=%d", resp.StatusCode)
+		return false
+	}
+
+	var bodyReader io.Reader = resp.Body
+	if resp.StatusCode == http.StatusOK && isRange {
+		if relativeStart > 0 {
+			if _, err := io.CopyN(io.Discard, resp.Body, relativeStart); err != nil {
+				s.logger.Printf("[WARN] skip to chunk start failed: %v", err)
+				return false
+			}
+		}
+		neededBytes := relativeEnd - relativeStart + 1
+		bodyReader = io.LimitReader(resp.Body, neededBytes)
+	}
+
+	if _, copyErr := io.Copy(w, bodyReader); copyErr != nil {
+		s.logger.Printf("[WARN] write chunk failed: %v", copyErr)
+		return false
+	}
+	return true
 }
 
 type byteRange struct {

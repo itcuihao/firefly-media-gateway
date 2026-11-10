@@ -51,6 +51,10 @@ type Config struct {
 	// Proxy 模式配置（通过 Worker）
 	WorkerBaseURL   string // Worker 服务 URL
 	WorkerAuthToken string // Worker 鉴权 token
+
+	// 缓存配置
+	CacheDir      string // 本地缓存根目录（默认 data/cache）
+	CacheMaxBytes int64  // 本地缓存最大字节数（默认 20GB）
 }
 
 func Load() (Config, error) {
@@ -69,6 +73,15 @@ func Load() (Config, error) {
 		TelegramChatID:   strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
 		WorkerBaseURL:    strings.TrimSpace(os.Getenv("WORKER_BASE_URL")),
 		WorkerAuthToken:  strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN")),
+		CacheDir:         getenv("CACHE_DIR", "data/cache"),
+	}
+
+	cacheMaxGB := intFromEnv("CACHE_MAX_GB", 20)
+	cfg.CacheMaxBytes = int64(cacheMaxGB) * 1024 * 1024 * 1024
+	if envBytes := strings.TrimSpace(os.Getenv("CACHE_MAX_BYTES")); envBytes != "" {
+		if v, err := strconv.ParseInt(envBytes, 10, 64); err == nil && v > 0 {
+			cfg.CacheMaxBytes = v
+		}
 	}
 	cfg.DatabaseDriver = resolveDatabaseDriver(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")), cfg.DatabaseURL)
 	if cfg.DatabaseURL == "" {

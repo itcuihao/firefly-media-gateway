@@ -50,6 +50,11 @@ func main() {
 	svc := media.NewService(repo, providers, cfg.ProviderDefault, cfg.PublicBaseURL)
 	svc.SetUploadConcurrency(cfg.UploadConcurrency)
 	h := httpapi.NewServer(svc, cfg.AuthToken, cfg.TelegramBotToken, cfg.WorkerBaseURL, cfg.WorkerAuthToken, cfg.PublicBaseURL, cfg.PrivateRules, cfg.DatabaseDriver, string(cfg.StorageMode), commit, logger)
+	if diskCache, err := httpapi.NewDiskCache(cfg.CacheDir, cfg.CacheMaxBytes, logger); err == nil {
+		h.SetDiskCache(diskCache)
+	} else {
+		logger.Printf("[WARN] failed to initialize disk cache: %v", err)
+	}
 
 	// 创建 S3 Gateway（可选）
 	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)
