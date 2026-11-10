@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject } from 'vue'
-import { apiRequest, openMediaAsset } from '../api'
+import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
 import type { MediaAsset } from '../api'
 
 const props = defineProps({
@@ -334,12 +334,13 @@ async function deleteAsset(mediaId: string) {
   }
 }
 
-function copyText(txt: string) {
-  navigator.clipboard.writeText(txt).then(() => {
+async function copyText(txt: string) {
+  const ok = await copyToClipboard(txt)
+  if (ok) {
     showToast('已成功复制到剪贴板！')
-  }).catch(() => {
+  } else {
     showToast('复制失败，请手动选择复制', 'error')
-  })
+  }
 }
 
 function extByMIME(mime: string) {
@@ -440,7 +441,7 @@ onMounted(() => {
             <span class="material-symbols-rounded" style="font-size: 36px; color: #fbbf24;">image</span>
             <span style="font-size: 10px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 原图</span>
           </div>
-          <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width:100%; height:100%; object-fit:cover;"></video>
+          <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover;"></video>
           <div v-else-if="asset.mimeType.startsWith('audio/') && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:8px; padding:12px;">
             <span class="material-symbols-rounded" style="font-size: 36px; color: hsl(var(--md-sys-color-primary));">music_note</span>
             <audio :src="asset.publicUrl" controls style="width:100%; max-width:200px;"></audio>
@@ -507,7 +508,7 @@ onMounted(() => {
               <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
                 <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
                 <span v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" class="material-symbols-rounded" style="font-size: 20px; color: #fbbf24;" title="HEIC 格式图片">image</span>
-                <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+                <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted playsinline style="width: 100%; height: 100%; object-fit: cover;"></video>
                 <span v-else-if="asset.mimeType.startsWith('audio/')" class="material-symbols-rounded" style="font-size: 20px; color: #d8b4fe;">music_note</span>
                 <span v-else class="material-symbols-rounded" style="font-size: 20px; color: hsl(var(--md-sys-color-primary));">description</span>
               </div>
@@ -697,7 +698,7 @@ onMounted(() => {
           <span style="font-size: 13px; color: #fff;">HEIC 格式原图</span>
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('video/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: #000; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
-          <video :src="activeAsset.publicUrl" controls style="width:100%; max-height:320px; object-fit:contain;"></video>
+          <video :src="activeAsset.publicUrl" controls playsinline style="width:100%; max-height:320px; object-fit:contain;"></video>
         </div>
         <div v-else-if="activeAsset.mimeType.startsWith('audio/') && activeAsset.status === 'active'" style="width: 100%; border-radius: 16px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); padding: 24px; display:flex; flex-direction:column; align-items:center; gap:12px;">
           <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>

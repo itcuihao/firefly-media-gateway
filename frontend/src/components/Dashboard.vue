@@ -257,7 +257,7 @@ onMounted(() => {
             </tr>
             <tr v-if="health?.worker_url" style="border-bottom: 1px solid rgba(255,255,255,0.05);">
               <td style="padding: 10px 0; color: hsl(var(--md-sys-color-on-surface-variant));">CF Worker 地址</td>
-              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; font-size: 11px;">
+              <td style="padding: 10px 0; text-align: right; font-family: monospace; color: #fff; font-size: 11px; word-break: break-all; max-width: 180px; margin-left: auto;">
                 {{ health?.worker_url }}
               </td>
             </tr>

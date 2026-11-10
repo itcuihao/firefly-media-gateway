@@ -116,6 +116,38 @@ export async function apiRequest<T = any>(
   return await resp.json()
 }
 
+// Robust clipboard copy with fallback for non-HTTPS and mobile web views
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch (_) {}
+  }
+  try {
+    const textArea = document.createElement('textarea')
+    textArea.value = text
+    textArea.style.position = 'fixed'
+    textArea.style.top = '0'
+    textArea.style.left = '0'
+    textArea.style.width = '2em'
+    textArea.style.height = '2em'
+    textArea.style.padding = '0'
+    textArea.style.border = 'none'
+    textArea.style.outline = 'none'
+    textArea.style.boxShadow = 'none'
+    textArea.style.background = 'transparent'
+    document.body.appendChild(textArea)
+    textArea.focus()
+    textArea.select()
+    const successful = document.execCommand('copy')
+    document.body.removeChild(textArea)
+    return successful
+  } catch (_) {
+    return false
+  }
+}
+
 // Helper to open media file URL in new tab injecting headers if necessary
 export async function openMediaAsset(publicUrl: string) {
   const activeWorkerUrl = localStorage.getItem('active_worker_url') || ''
@@ -127,6 +159,8 @@ export async function openMediaAsset(publicUrl: string) {
     return
   }
 
+  // Pre-open window synchronously to prevent mobile browser popup blockers
+  const newWin = window.open('about:blank', '_blank')
   const token = getApiToken()
   try {
     const headers: Record<string, string> = {
@@ -141,11 +175,15 @@ export async function openMediaAsset(publicUrl: string) {
     if (resp.ok) {
       const blob = await resp.blob()
       const objectURL = URL.createObjectURL(blob)
-      window.open(objectURL, '_blank')
+      if (newWin) {
+        newWin.location.href = objectURL
+      } else {
+        window.location.href = objectURL
+      }
     } else {
-      window.open(publicUrl, '_blank')
+      if (newWin) newWin.location.href = publicUrl
     }
   } catch (_) {
-    window.open(publicUrl, '_blank')
+    if (newWin) newWin.location.href = publicUrl
   }
 }

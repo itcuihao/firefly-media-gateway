@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, inject } from 'vue'
-import { apiRequest, openMediaAsset } from '../api'
+import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
 import type { MediaAsset } from '../api'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
@@ -138,7 +138,7 @@ const htmlCode = computed(() => {
   if (activeAsset.value.mimeType.startsWith('image/')) {
     return `<img src="${activeAsset.value.publicUrl}" alt="${activeAsset.value.mediaId}" />`
   }
-  return `<video src="${activeAsset.value.publicUrl}" controls width="640" height="360"></video>`
+  return `<video src="${activeAsset.value.publicUrl}" controls playsinline width="640" height="360"></video>`
 })
 
 const markdownCode = computed(() => {
@@ -151,12 +151,13 @@ const bbCode = computed(() => {
   return `[img]${activeAsset.value.publicUrl}[/img]`
 })
 
-function copyText(txt: string, typeName: string) {
-  navigator.clipboard.writeText(txt).then(() => {
+async function copyText(txt: string, typeName: string) {
+  const ok = await copyToClipboard(txt)
+  if (ok) {
     showToast(`复制 ${typeName} 成功！`)
-  }).catch(() => {
+  } else {
     showToast('复制失败，请手动选择复制', 'error')
-  })
+  }
 }
 
 function extByMIME(mime: string) {
@@ -243,7 +244,7 @@ onMounted(() => {
             <span class="material-symbols-rounded" style="font-size: 48px; color: #fbbf24;">image</span>
             <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 格式原图</span>
           </div>
-          <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted></video>
+          <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted playsinline></video>
           <div v-else-if="asset.mimeType.startsWith('audio/')" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
             <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
             <audio :src="asset.publicUrl" controls style="width:100%; max-width:240px;"></audio>
@@ -294,7 +295,7 @@ onMounted(() => {
         <div class="m3-dialog-body share-dialog-body">
           <div class="share-preview">
             <img v-if="activeAsset.mimeType.startsWith('image/')" :src="activeAsset.publicUrl" alt="Preview" />
-            <video v-else-if="activeAsset.mimeType.startsWith('video/')" :src="activeAsset.publicUrl" controls></video>
+            <video v-else-if="activeAsset.mimeType.startsWith('video/')" :src="activeAsset.publicUrl" controls playsinline></video>
           </div>
 
           <!-- Sharing Links Blocks -->
@@ -408,10 +409,28 @@ onMounted(() => {
 @media (max-width: 768px) {
   .masonry-wrapper {
     column-count: 2;
+    column-gap: 12px;
   }
 }
 
 @media (max-width: 480px) {
+  .masonry-wrapper {
+    column-count: 2;
+    column-gap: 10px;
+  }
+  .masonry-card {
+    margin-bottom: 10px;
+    border-radius: 12px;
+  }
+  .masonry-info {
+    padding: 10px;
+  }
+  .masonry-title {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 330px) {
   .masonry-wrapper {
     column-count: 1;
   }

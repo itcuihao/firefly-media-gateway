@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, inject, computed } from 'vue'
-import { getApiBaseUrl } from '../api'
+import { getApiBaseUrl, copyToClipboard } from '../api'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
@@ -128,12 +128,13 @@ upload();`
   return ''
 })
 
-function copyS3Command() {
-  navigator.clipboard.writeText(activeS3Code.value).then(() => {
+async function copyS3Command() {
+  const ok = await copyToClipboard(activeS3Code.value)
+  if (ok) {
     showToast('示例代码已复制到剪贴板！')
-  }).catch(() => {
+  } else {
     showToast('复制失败，请手动选择复制', 'error')
-  })
+  }
 }
 
 function convertImageToWebp(file: File, quality = 0.85): Promise<Blob> {
@@ -194,20 +195,22 @@ function onFileChange(e: Event) {
   }
 }
 
-function copyConsoleOutput() {
-  navigator.clipboard.writeText(responseBody.value).then(() => {
+async function copyConsoleOutput() {
+  const ok = await copyToClipboard(responseBody.value)
+  if (ok) {
     showToast('已成功复制到剪贴板！')
-  }).catch(() => {
+  } else {
     showToast('复制失败，请手动选择复制', 'error')
-  })
+  }
 }
 
-function copyCurlCommand() {
-  navigator.clipboard.writeText(generatedCurl.value).then(() => {
+async function copyCurlCommand() {
+  const ok = await copyToClipboard(generatedCurl.value)
+  if (ok) {
     showToast('Curl 命令已复制到剪贴板！')
-  }).catch(() => {
+  } else {
     showToast('复制失败，请手动选择复制', 'error')
-  })
+  }
 }
 
 // Compute curl dynamically based on the current form state
@@ -746,5 +749,22 @@ async function runSandboxApi() {
   background: rgba(255, 255, 255, 0.08);
   color: hsl(var(--md-sys-color-primary));
   font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .s3-tabs-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .s3-tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+  .s3-tab-btn {
+    flex-shrink: 0;
+  }
 }
 </style>
