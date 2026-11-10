@@ -258,7 +258,13 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+	isPublic := s.isAssetPublic(asset)
+	cacheControl := "public, max-age=31536000, immutable"
+	if !isPublic {
+		cacheControl = "private, no-cache"
+	}
+	w.Header().Set("Cache-Control", cacheControl)
 
 	// Calculate immutable ETag for caching
 	etag := fmt.Sprintf("%q", asset.ID)
@@ -272,6 +278,18 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", etag)
 
+	// HEAD fast-path: return metadata headers without downloading payload
+	if r.Method == http.MethodHead {
+		if streamInfo.TotalBytes > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
+		}
+		if streamInfo.MIMEType != "" {
+			w.Header().Set("Content-Type", streamInfo.MIMEType)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// If-None-Match 304 handling (only for non-Range requests)
 	if r.Header.Get("Range") == "" {
 		if match := r.Header.Get("If-None-Match"); match != "" {
@@ -283,17 +301,17 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if streamInfo.IsChunked {
-		s.proxyChunkedMedia(w, r, streamInfo, mediaID)
+		s.proxyChunkedMedia(w, r, streamInfo, mediaID, cacheControl)
 		return
 	}
 
 	if isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r) {
-		if s.tryServeWebPCache(w, r, mediaID, streamInfo) {
+		if s.tryServeWebPCache(w, r, mediaID, streamInfo, cacheControl) {
 			return
 		}
 	}
 
-	s.proxySingleMedia(w, r, streamInfo, mediaID)
+	s.proxySingleMedia(w, r, streamInfo, mediaID, cacheControl)
 }
 
 func clientAcceptsWebP(r *http.Request) bool {
@@ -309,7 +327,7 @@ func isCompressibleImage(mime string) bool {
 	return m == "image/jpeg" || m == "image/png" || m == "image/jpg"
 }
 
-func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, mediaID string, streamInfo media.StreamInfo) bool {
+func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, mediaID string, streamInfo media.StreamInfo, cacheControl string) bool {
 	cacheDir := "data/cache"
 	if s.diskCache != nil {
 		cacheDir = s.diskCache.Dir()
@@ -327,7 +345,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 		_ = os.Chtimes(cachePath, time.Now(), time.Now())
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", cacheControl)
 		http.ServeFile(w, r, cachePath)
 		return true
 	}
@@ -404,7 +422,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	if _, err := os.Stat(cachePath); err == nil {
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", cacheControl)
 		http.ServeFile(w, r, cachePath)
 		return true
 	}
@@ -412,7 +430,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	return false
 }
 
-func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string) {
+func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string, cacheControl string) {
 	// Attempt to serve from disk cache if file size is known and within reasonable bounds (<= 100MB)
 	if s.diskCache != nil && streamInfo.TotalBytes > 0 && streamInfo.TotalBytes <= 100*1024*1024 {
 		fileKey := fmt.Sprintf("%s.bin", mediaID)
@@ -427,9 +445,7 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 				if w.Header().Get("Accept-Ranges") == "" {
 					w.Header().Set("Accept-Ranges", "bytes")
 				}
-				if w.Header().Get("Cache-Control") == "" {
-					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-				}
+				w.Header().Set("Cache-Control", cacheControl)
 				fi, _ := f.Stat()
 				var modTime time.Time
 				if fi != nil {
@@ -469,9 +485,7 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	if w.Header().Get("Accept-Ranges") == "" {
 		w.Header().Set("Accept-Ranges", "bytes")
 	}
-	if w.Header().Get("Cache-Control") == "" {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	}
+	w.Header().Set("Cache-Control", cacheControl)
 
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -479,7 +493,7 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	}
 }
 
-func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string) {
+func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo, mediaID string, cacheControl string) {
 	chunkSize := streamInfo.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = 15 * 1024 * 1024 // Fallback default chunk size
@@ -511,14 +525,14 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, streamInfo.TotalBytes))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", cacheControl)
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		if streamInfo.TotalBytes > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", cacheControl)
 		w.WriteHeader(http.StatusOK)
 	}
 

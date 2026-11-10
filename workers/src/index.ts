@@ -739,6 +739,47 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
     const mimeType = getFileData.result.mime_type || 'application/octet-stream';
     const fileSize = getFileData.result.file_size || 0;
 
+    const ext = extByMIME(mimeType);
+    const filename = `${fileId}${ext}`;
+
+    // HEAD 请求快速返回元数据响应，无需下载文件流
+    if (request.method === 'HEAD') {
+      const headHeaders = new Headers();
+      headHeaders.set('Content-Type', mimeType);
+      if (fileSize > 0) {
+        headHeaders.set('Content-Length', String(fileSize));
+      }
+      headHeaders.set('Accept-Ranges', 'bytes');
+      if (isPrivate) {
+        headHeaders.set('Cache-Control', 'private, no-cache');
+      } else {
+        headHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+      headHeaders.set('Access-Control-Allow-Origin', '*');
+      headHeaders.set('X-Served-By-Bot', botName || '');
+      headHeaders.set('Content-Disposition', `inline; filename="${filename}"`);
+      return new Response(null, {
+        status: 200,
+        headers: headHeaders,
+      });
+    }
+
+    // 校验 Range 边界，非法请求返回 416
+    let parsedRange: { start: number; end: number } | null = null;
+    if (rangeHeader && fileSize > 0) {
+      parsedRange = parseRange(rangeHeader, fileSize);
+      if (!parsedRange) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            'Content-Range': `bytes */${fileSize}`,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+    }
+
     // 流式返回文件
     const headers = new Headers();
 
@@ -756,19 +797,6 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
     const responseHeaders = new Headers();
     responseHeaders.set('Content-Type', mimeType);
 
-    // 优先采用上游返回的 Content-Length 与 Content-Range（特别是 Range 请求返回 206 时）
-    const upstreamLength = fileResp.headers.get('Content-Length');
-    if (upstreamLength) {
-      responseHeaders.set('Content-Length', upstreamLength);
-    } else if (fileSize > 0) {
-      responseHeaders.set('Content-Length', String(fileSize));
-    }
-
-    const upstreamRange = fileResp.headers.get('Content-Range');
-    if (upstreamRange) {
-      responseHeaders.set('Content-Range', upstreamRange);
-    }
-
     responseHeaders.set('Accept-Ranges', 'bytes');
     if (isPrivate) {
       responseHeaders.set('Cache-Control', 'private, no-cache');
@@ -779,15 +807,33 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
     }
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('X-Served-By-Bot', botName || '');
-
-    const ext = extByMIME(mimeType);
-    const filename = `${fileId}${ext}`;
     responseHeaders.set('Content-Disposition', `inline; filename="${filename}"`);
 
-    // 返回状态码（Range 请求返回 206）
-    const status = rangeHeader && fileResp.status === 206 ? 206 : fileResp.status;
+    let bodyToStream: ReadableStream<Uint8Array> | null = fileResp.body;
+    let status = fileResp.status;
 
-    const responseToReturn = new Response(fileResp.body, {
+    if (parsedRange && fileResp.status === 200 && fileResp.body) {
+      // 上游返回 200 OK 时本地精准切片为 206 Partial Content
+      status = 206;
+      responseHeaders.set('Content-Range', `bytes ${parsedRange.start}-${parsedRange.end}/${fileSize}`);
+      responseHeaders.set('Content-Length', String(parsedRange.end - parsedRange.start + 1));
+      bodyToStream = sliceStream(fileResp.body, parsedRange.start, parsedRange.end);
+    } else {
+      const upstreamLength = fileResp.headers.get('Content-Length');
+      if (upstreamLength) {
+        responseHeaders.set('Content-Length', upstreamLength);
+      } else if (fileSize > 0) {
+        responseHeaders.set('Content-Length', String(fileSize));
+      }
+
+      const upstreamRange = fileResp.headers.get('Content-Range');
+      if (upstreamRange) {
+        responseHeaders.set('Content-Range', upstreamRange);
+      }
+      status = rangeHeader && fileResp.status === 206 ? 206 : fileResp.status;
+    }
+
+    const responseToReturn = new Response(bodyToStream, {
       status,
       headers: responseHeaders,
     });
@@ -941,4 +987,83 @@ function extByMIME(mimeType: string): string {
     case 'audio/mp4': return '.m4a';
     default: return '';
   }
+}
+
+function parseRange(header: string, size: number): { start: number; end: number } | null {
+  if (!header.startsWith('bytes=')) return null;
+  const part = header.slice(6).trim();
+  const commaIdx = part.indexOf(',');
+  const rangeStr = commaIdx >= 0 ? part.slice(0, commaIdx).trim() : part;
+  const parts = rangeStr.split('-');
+  if (parts.length !== 2) return null;
+
+  let start = 0;
+  let end = size - 1;
+
+  if (parts[0] === '' && parts[1] !== '') {
+    const suffix = parseInt(parts[1], 10);
+    if (isNaN(suffix) || suffix <= 0) return null;
+    start = size - suffix;
+    if (start < 0) start = 0;
+    end = size - 1;
+  } else if (parts[0] !== '' && parts[1] === '') {
+    start = parseInt(parts[0], 10);
+    if (isNaN(start) || start < 0 || (size > 0 && start >= size)) return null;
+    end = size - 1;
+  } else if (parts[0] !== '' && parts[1] !== '') {
+    start = parseInt(parts[0], 10);
+    end = parseInt(parts[1], 10);
+    if (isNaN(start) || isNaN(end) || start < 0 || start > end || (size > 0 && start >= size)) return null;
+    if (size > 0 && end >= size) end = size - 1;
+  } else {
+    return null;
+  }
+
+  return { start, end };
+}
+
+function sliceStream(body: ReadableStream<Uint8Array>, start: number, end: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let bytesRead = 0;
+  const needed = end - start + 1;
+  let emitted = 0;
+
+  return new ReadableStream({
+    async pull(controller) {
+      while (emitted < needed) {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        const chunk = value;
+        const chunkStart = bytesRead;
+        const chunkEnd = bytesRead + chunk.length - 1;
+        bytesRead += chunk.length;
+
+        if (chunkEnd < start) {
+          continue;
+        }
+        if (chunkStart > end) {
+          controller.close();
+          reader.cancel();
+          return;
+        }
+
+        const sliceStart = Math.max(0, start - chunkStart);
+        const sliceEnd = Math.min(chunk.length, end - chunkStart + 1);
+        const sub = chunk.subarray(sliceStart, sliceEnd);
+        controller.enqueue(sub);
+        emitted += sub.length;
+        if (emitted >= needed) {
+          controller.close();
+          reader.cancel();
+          return;
+        }
+      }
+    },
+    cancel() {
+      reader.cancel();
+    },
+  });
 }

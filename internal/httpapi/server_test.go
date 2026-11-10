@@ -233,7 +233,7 @@ func TestSingleflightWebPConversion(t *testing.T) {
 			req := httptest.NewRequest("GET", "/api/v1/media/concurrent-img", nil)
 			req.Header.Set("Accept", "image/webp")
 			rr := httptest.NewRecorder()
-			success := srv.tryServeWebPCache(rr, req, "concurrent-img", streamInfo)
+			success := srv.tryServeWebPCache(rr, req, "concurrent-img", streamInfo, "public, max-age=31536000, immutable")
 			if !success {
 				t.Errorf("tryServeWebPCache failed")
 			}
@@ -245,5 +245,88 @@ func TestSingleflightWebPConversion(t *testing.T) {
 	// Singleflight must coalesce the 10 requests into at most 1 upstream call
 	if got := atomic.LoadInt32(&convertCount); got != 1 {
 		t.Errorf("expected singleflight to coalesce into 1 upstream call, got %d", got)
+	}
+}
+
+func TestHeadRequestFastPath(t *testing.T) {
+	repo := &mockRepository{
+		asset: media.Asset{
+			ID:        "head-test-media",
+			Provider:  "mock",
+			MIMEType:  "video/mp4",
+			SizeBytes: 10485760, // 10MB
+			Status:    media.StatusActive,
+		},
+	}
+	var upstreamCalled int32
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalled, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+
+	prov := &mockProvider{url: mockServer.URL}
+	svc := media.NewService(repo, map[string]provider.StorageProvider{"mock": prov}, "mock", "http://localhost:8080")
+	logger := log.New(io.Discard, "", 0)
+	srv := NewServer(svc, "test-token", "", "", "", "http://localhost:8080", nil, "sqlite", "direct", "test-commit", logger)
+
+	req := httptest.NewRequest("HEAD", "/api/v1/media/head-test-media", nil)
+	req.SetPathValue("mediaId", "head-test-media")
+	rr := httptest.NewRecorder()
+
+	srv.serveMediaBinary(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for HEAD request, got %d", rr.Code)
+	}
+	if cl := rr.Header().Get("Content-Length"); cl != "10485760" {
+		t.Errorf("expected Content-Length 10485760, got %q", cl)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Errorf("expected Content-Type video/mp4, got %q", ct)
+	}
+	if ar := rr.Header().Get("Accept-Ranges"); ar != "bytes" {
+		t.Errorf("expected Accept-Ranges bytes, got %q", ar)
+	}
+	if bodyLen := rr.Body.Len(); bodyLen != 0 {
+		t.Errorf("expected empty body for HEAD request, got %d bytes", bodyLen)
+	}
+	if calls := atomic.LoadInt32(&upstreamCalled); calls != 0 {
+		t.Errorf("expected 0 upstream data calls for HEAD request, got %d", calls)
+	}
+}
+
+func TestPrivateAssetCacheControl(t *testing.T) {
+	repo := &mockRepository{
+		asset: media.Asset{
+			ID:        "secret-doc",
+			Provider:  "mock",
+			MIMEType:  "application/pdf",
+			SizeBytes: 2048,
+			Project:   "internal-secret",
+			Status:    media.StatusActive,
+		},
+	}
+	prov := &mockProvider{url: "http://mock.url"}
+	svc := media.NewService(repo, map[string]provider.StorageProvider{"mock": prov}, "mock", "http://localhost:8080")
+	logger := log.New(io.Discard, "", 0)
+
+	// Configure private rule matching project "internal-secret"
+	srv := NewServer(svc, "secret-token", "", "", "", "http://localhost:8080", []string{"internal-secret"}, "sqlite", "direct", "test-commit", logger)
+
+	// Authorized HEAD request to verify private Cache-Control
+	req := httptest.NewRequest("HEAD", "/api/v1/media/secret-doc", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	req.SetPathValue("mediaId", "secret-doc")
+	rr := httptest.NewRecorder()
+
+	srv.serveMediaBinary(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for authorized access, got %d", rr.Code)
+	}
+	cc := rr.Header().Get("Cache-Control")
+	if !strings.Contains(cc, "private") || strings.Contains(cc, "public") {
+		t.Errorf("expected private Cache-Control for private asset, got %q", cc)
 	}
 }
