@@ -26,6 +26,7 @@ import (
 
 	"github.com/KarpelesLab/gowebp"
 	_ "golang.org/x/image/bmp"
+	"golang.org/x/sync/singleflight"
 )
 
 const maxRequestBodyBytes int64 = 2005 * 1024 * 1024 // 2GB + 5MB buffer
@@ -42,6 +43,7 @@ type Server struct {
 	storageMode      string
 	commit           string
 	logger           *log.Logger
+	sf               singleflight.Group
 }
 
 func NewServer(svc *media.Service, authToken, telegramBotToken, workerBaseURL, workerAuthToken, publicBaseURL string, privateRules []string, databaseDriver, storageMode, commit string, logger *log.Logger) *Server {
@@ -230,6 +232,30 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		filename += ext
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+	// Calculate immutable ETag for caching
+	etag := fmt.Sprintf("%q", asset.ID)
+	if asset.SHA256 != nil && *asset.SHA256 != "" {
+		etag = fmt.Sprintf("%q", *asset.SHA256)
+	}
+
+	willServeWebP := !streamInfo.IsChunked && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r)
+	if willServeWebP {
+		etag = fmt.Sprintf("%q", "webp-"+asset.ID)
+	}
+	w.Header().Set("ETag", etag)
+
+	// If-None-Match 304 handling (only for non-Range requests)
+	if r.Header.Get("Range") == "" {
+		if match := r.Header.Get("If-None-Match"); match != "" {
+			if strings.Contains(match, etag) || match == "*" {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+	}
 
 	if streamInfo.IsChunked {
 		s.proxyChunkedMedia(w, r, streamInfo)
@@ -266,79 +292,89 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	}
 
 	cachePath := filepath.Join(cacheDir, mediaID+".webp")
-	
-	// If cache exists, serve it
+
+	// If cache already exists, serve immediately
 	if _, err := os.Stat(cachePath); err == nil {
 		s.logger.Printf("[WEBP] serving cached WebP for %q", mediaID)
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		http.ServeFile(w, r, cachePath)
 		return true
 	}
 
-	// Try to convert on-the-fly and save to cache
-	s.logger.Printf("[WEBP] cache miss for %q, downloading and converting...", mediaID)
-	
-	// Download original image
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, streamInfo.StreamURL, nil)
-	if err != nil {
-		s.logger.Printf("[WEBP] failed to build download request: %v", err)
-		return false
-	}
-	for k, v := range streamInfo.Headers {
-		req.Header.Set(k, v)
-	}
+	// Use singleflight to coalesce concurrent cache misses for the same mediaID
+	_, sfErr, _ := s.sf.Do("webp:"+mediaID, func() (any, error) {
+		// Double-check inside singleflight lock
+		if _, err := os.Stat(cachePath); err == nil {
+			return cachePath, nil
+		}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		s.logger.Printf("[WEBP] failed to download original image: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
+		s.logger.Printf("[WEBP] cache miss for %q, downloading and converting...", mediaID)
 
-	if resp.StatusCode != http.StatusOK {
-		s.logger.Printf("[WEBP] download failed with status: %d", resp.StatusCode)
-		return false
-	}
+		// Download original image using detached context to avoid cancellation if one caller drops
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, streamInfo.StreamURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build download request: %w", err)
+		}
+		for k, v := range streamInfo.Headers {
+			req.Header.Set(k, v)
+		}
 
-	// Decode image
-	img, _, err := image.Decode(resp.Body)
-	if err != nil {
-		s.logger.Printf("[WEBP] failed to decode image: %v", err)
-		return false
-	}
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("download original image: %w", err)
+		}
+		defer resp.Body.Close()
 
-	// Convert and save
-	tmpFile, err := os.CreateTemp(cacheDir, "webp-tmp-*")
-	if err != nil {
-		s.logger.Printf("[WEBP] failed to create temp file: %v", err)
-		return false
-	}
-	tmpName := tmpFile.Name()
-	defer func() {
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("download status: %d", resp.StatusCode)
+		}
+
+		img, _, err := image.Decode(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("decode image: %w", err)
+		}
+
+		tmpFile, err := os.CreateTemp(cacheDir, "webp-tmp-*")
+		if err != nil {
+			return nil, fmt.Errorf("create temp file: %w", err)
+		}
+		tmpName := tmpFile.Name()
+		defer func() {
+			tmpFile.Close()
+			os.Remove(tmpName)
+		}()
+
+		err = gowebp.Encode(tmpFile, img, &gowebp.Options{Lossy: true, Quality: 80})
+		if err != nil {
+			return nil, fmt.Errorf("encode webp: %w", err)
+		}
 		tmpFile.Close()
-		os.Remove(tmpName)
-	}()
 
-	err = gowebp.Encode(tmpFile, img, &gowebp.Options{Lossy: true, Quality: 80})
-	if err != nil {
-		s.logger.Printf("[WEBP] failed to encode to WebP: %v", err)
+		if err := os.Rename(tmpName, cachePath); err != nil {
+			return nil, fmt.Errorf("save cache file: %w", err)
+		}
+
+		s.logger.Printf("[WEBP] successfully created cache for %q", mediaID)
+		return cachePath, nil
+	})
+
+	if sfErr != nil {
+		s.logger.Printf("[WEBP] conversion failed for %q: %v", mediaID, sfErr)
 		return false
 	}
-	tmpFile.Close()
 
-	// Rename temp file to target cache path atomically
-	if err := os.Rename(tmpName, cachePath); err != nil {
-		s.logger.Printf("[WEBP] failed to save cache file: %v", err)
-		return false
+	if _, err := os.Stat(cachePath); err == nil {
+		w.Header().Set("Content-Type", "image/webp")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeFile(w, r, cachePath)
+		return true
 	}
 
-	s.logger.Printf("[WEBP] successfully created cache for %q", mediaID)
-	w.Header().Set("Content-Type", "image/webp")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
-	http.ServeFile(w, r, cachePath)
-	return true
+	return false
 }
 
 func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, streamInfo media.StreamInfo) {
@@ -369,6 +405,9 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	if w.Header().Get("Accept-Ranges") == "" {
 		w.Header().Set("Accept-Ranges", "bytes")
 	}
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
 
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -389,6 +428,7 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 	if rangeHeader := strings.TrimSpace(r.Header.Get("Range")); rangeHeader != "" {
 		ranges, err := parseRangeHeader(rangeHeader, streamInfo.TotalBytes)
 		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", streamInfo.TotalBytes))
 			s.writeError(w, r, http.StatusRequestedRangeNotSatisfiable, "invalid range header", err)
 			return
 		}
@@ -407,12 +447,14 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, streamInfo.TotalBytes))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		if streamInfo.TotalBytes > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(streamInfo.TotalBytes, 10))
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.WriteHeader(http.StatusOK)
 	}
 
@@ -462,7 +504,22 @@ func (s *Server) proxyChunkedMedia(w http.ResponseWriter, r *http.Request, strea
 			return
 		}
 
-		_, copyErr := io.Copy(w, resp.Body)
+		var bodyReader io.Reader = resp.Body
+		if resp.StatusCode == http.StatusOK && isRange {
+			// Upstream returned the full chunk instead of 206 Partial Content;
+			// slice the requested byte range locally.
+			if relativeStart > 0 {
+				if _, err := io.CopyN(io.Discard, resp.Body, relativeStart); err != nil {
+					resp.Body.Close()
+					s.logger.Printf("[WARN]  skip to chunk start failed: %v", err)
+					return
+				}
+			}
+			neededBytes := relativeEnd - relativeStart + 1
+			bodyReader = io.LimitReader(resp.Body, neededBytes)
+		}
+
+		_, copyErr := io.Copy(w, bodyReader)
 		resp.Body.Close()
 
 		if copyErr != nil {
@@ -530,7 +587,7 @@ func parseRangeHeader(header string, size int64) ([]byteRange, error) {
 				}
 			}
 		}
-		if r.start >= size {
+		if r.start >= size || r.start > r.end {
 			continue
 		}
 		ranges = append(ranges, r)

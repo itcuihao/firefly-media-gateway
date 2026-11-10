@@ -287,6 +287,59 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 		if !bytes.Equal(rr2.Body.Bytes(), expectedSlice) {
 			t.Fatalf("cross-chunk boundary streamed bytes do not match original video slice!")
 		}
+
+		// 3c. Out-of-bounds range request (bytes 20000000-30000000 on 16MB file) -> 416 with Content-Range: bytes */size
+		req3 := httptest.NewRequest("GET", "/api/v1/media/"+largeAssetID+"/stream", nil)
+		req3.Header.Set("Range", "bytes=20000000-30000000")
+		req3.Header.Set("Authorization", "Bearer test-token")
+		rr3 := httptest.NewRecorder()
+		handler.ServeHTTP(rr3, req3)
+
+		if rr3.Code != http.StatusRequestedRangeNotSatisfiable {
+			t.Fatalf("expected 416 Range Not Satisfiable for out-of-bounds, got %d", rr3.Code)
+		}
+		if cr := rr3.Header().Get("Content-Range"); !strings.HasPrefix(cr, "bytes */") {
+			t.Fatalf("expected Content-Range starting with 'bytes */', got %q", cr)
+		}
+
+		// 3d. Upstream returns 200 OK (simulate storage provider ignoring Range header)
+		savedTransport := http.DefaultTransport
+		http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasPrefix(req.URL.Host, "mock-storage.internal") {
+				fileID := strings.TrimPrefix(req.URL.Path, "/")
+				memProv.mu.Lock()
+				data, ok := memProv.files[fileID]
+				memProv.mu.Unlock()
+				if !ok {
+					return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found"))}, nil
+				}
+				// Force HTTP 200 OK with the full chunk data, completely ignoring Range!
+				h := make(http.Header)
+				h.Set("Content-Type", "application/octet-stream")
+				h.Set("Content-Length", strconv.Itoa(len(data)))
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(bytes.NewReader(data)),
+					Header:        h,
+					ContentLength: int64(len(data)),
+				}, nil
+			}
+			return savedTransport.RoundTrip(req)
+		})
+
+		req4 := httptest.NewRequest("GET", "/api/v1/media/"+largeAssetID+"/stream", nil)
+		req4.Header.Set("Range", "bytes=500-599")
+		req4.Header.Set("Authorization", "Bearer test-token")
+		rr4 := httptest.NewRecorder()
+		handler.ServeHTTP(rr4, req4)
+		http.DefaultTransport = savedTransport // restore
+
+		if rr4.Code != http.StatusPartialContent {
+			t.Fatalf("expected 206 Partial Content when upstream returns 200, got %d", rr4.Code)
+		}
+		if !bytes.Equal(rr4.Body.Bytes(), largeVideoData[500:600]) {
+			t.Fatalf("streamed bytes sliced from 200 OK upstream do not match expected slice: got len %d, want 100", len(rr4.Body.Bytes()))
+		}
 	})
 
 	// ==========================================

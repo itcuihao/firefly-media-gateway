@@ -10,6 +10,7 @@ const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('sho
 const loading = ref(true)
 const health = ref<HealthInfo | null>(null)
 const mediaList = ref<MediaAsset[]>([])
+const totalCountInDb = ref<number | null>(null)
 const apiToken = ref(getApiToken())
 
 // Dynamic data counters computed from loaded media assets
@@ -24,6 +25,7 @@ const mediaStats = computed(() => {
     }
   }
 
+  const list = Array.isArray(mediaList.value) ? mediaList.value : []
   let imgCount = 0
   let imgBytes = 0
   let vidCount = 0
@@ -32,7 +34,7 @@ const mediaStats = computed(() => {
   let otherBytes = 0
   let totalBytes = 0
 
-  mediaList.value.forEach(asset => {
+  list.forEach(asset => {
     totalBytes += asset.sizeBytes
     const mime = asset.mimeType.toLowerCase()
     if (mime.startsWith('image/')) {
@@ -47,7 +49,8 @@ const mediaStats = computed(() => {
     }
   })
 
-  const totalCount = mediaList.value.length
+  const sampleCount = list.length
+  const totalCount = totalCountInDb.value !== null ? totalCountInDb.value : sampleCount
 
   return {
     totalCount: String(totalCount),
@@ -55,17 +58,17 @@ const mediaStats = computed(() => {
     images: {
       count: String(imgCount),
       size: formatBytes(imgBytes),
-      percent: totalCount > 0 ? (imgCount / totalCount) * 100 : 0
+      percent: sampleCount > 0 ? (imgCount / sampleCount) * 100 : 0
     },
     videos: {
       count: String(vidCount),
       size: formatBytes(vidBytes),
-      percent: totalCount > 0 ? (vidCount / totalCount) * 100 : 0
+      percent: sampleCount > 0 ? (vidCount / sampleCount) * 100 : 0
     },
     others: {
       count: String(otherCount),
       size: formatBytes(otherBytes),
-      percent: totalCount > 0 ? (otherCount / totalCount) * 100 : 0
+      percent: sampleCount > 0 ? (otherCount / sampleCount) * 100 : 0
     }
   }
 })
@@ -95,8 +98,23 @@ async function fetchStats() {
   }
 
   try {
-    const listData = await apiRequest<MediaAsset[]>('/api/v1/media?limit=100')
-    mediaList.value = listData
+    interface MediaResponse {
+      total: number
+      limit: number
+      offset: number
+      items: MediaAsset[]
+    }
+    const resData = await apiRequest<MediaResponse | MediaAsset[]>('/api/v1/media?limit=100')
+    if (Array.isArray(resData)) {
+      mediaList.value = resData
+      totalCountInDb.value = resData.length
+    } else if (resData && Array.isArray(resData.items)) {
+      mediaList.value = resData.items
+      totalCountInDb.value = typeof resData.total === 'number' ? resData.total : resData.items.length
+    } else {
+      mediaList.value = []
+      totalCountInDb.value = 0
+    }
   } catch (err: any) {
     showToast('拉取资源失败，请检查 Bearer Token 配置', 'error')
     console.error('Failed to fetch media assets list:', err)

@@ -13,7 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"firefly-media-gateway/internal/media"
 	"firefly-media-gateway/internal/provider"
@@ -136,6 +139,28 @@ func TestDynamicWebPConversion(t *testing.T) {
 		t.Errorf("expected cache file %q to be created, but it was not", cacheFile)
 	}
 
+	// Verify Cache-Control header
+	cc := resp.Header.Get("Cache-Control")
+	if !strings.Contains(cc, "immutable") {
+		t.Errorf("expected Cache-Control to contain immutable, got %q", cc)
+	}
+
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Errorf("expected ETag header to be set, got empty")
+	}
+
+	// Test Case 1b: If-None-Match 304 Not Modified
+	req304 := httptest.NewRequest("GET", "/api/v1/media/test-img", nil)
+	req304.Header.Set("Accept", "image/webp")
+	req304.Header.Set("If-None-Match", etag)
+	req304.SetPathValue("mediaId", "test-img")
+	rr304 := httptest.NewRecorder()
+	srv.serveMediaBinary(rr304, req304)
+	if rr304.Code != http.StatusNotModified {
+		t.Errorf("expected status 304 Not Modified, got %d", rr304.Code)
+	}
+
 	// 6. Test Case 2: Request with ?raw=true
 	reqRaw := httptest.NewRequest("GET", "/api/v1/media/test-img?raw=true", nil)
 	reqRaw.Header.Set("Accept", "image/webp")
@@ -153,5 +178,72 @@ func TestDynamicWebPConversion(t *testing.T) {
 	contentTypeRaw := respRaw.Header.Get("Content-Type")
 	if strings.Contains(contentTypeRaw, "webp") {
 		t.Errorf("expected raw PNG, got %q", contentTypeRaw)
+	}
+}
+
+func TestSingleflightWebPConversion(t *testing.T) {
+	cacheDir := "data/cache"
+	_ = os.RemoveAll(cacheDir)
+	defer os.RemoveAll(cacheDir)
+
+	repo := &mockRepository{
+		asset: media.Asset{
+			ID:        "concurrent-img",
+			Provider:  "mock",
+			MIMEType:  "image/png",
+			SizeBytes: 100,
+			Status:    media.StatusActive,
+		},
+	}
+	prov := &mockProvider{}
+
+	var convertCount int32
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&convertCount, 1)
+		time.Sleep(30 * time.Millisecond) // simulate upstream network latency
+
+		img := image.NewRGBA(image.Rect(0, 0, 50, 50))
+		for x := 0; x < 50; x++ {
+			for y := 0; y < 50; y++ {
+				img.Set(x, y, color.RGBA{R: uint8(x * 5), G: uint8(y * 5), B: 200, A: 255})
+			}
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_ = png.Encode(w, img)
+	}))
+	defer mockServer.Close()
+	prov.url = mockServer.URL
+
+	svc := media.NewService(repo, map[string]provider.StorageProvider{"mock": prov}, "mock", "http://localhost:8080")
+	logger := log.New(io.Discard, "", 0)
+	srv := NewServer(svc, "test-token", "", "", "", "http://localhost:8080", nil, "sqlite", "direct", "test-commit", logger)
+
+	streamInfo := media.StreamInfo{
+		StreamURL: mockServer.URL + "/test.png",
+	}
+
+	// Send 10 concurrent requests for the exact same uncached mediaID
+	const concurrency = 10
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("GET", "/api/v1/media/concurrent-img", nil)
+			req.Header.Set("Accept", "image/webp")
+			rr := httptest.NewRecorder()
+			success := srv.tryServeWebPCache(rr, req, "concurrent-img", streamInfo)
+			if !success {
+				t.Errorf("tryServeWebPCache failed")
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Singleflight must coalesce the 10 requests into at most 1 upstream call
+	if got := atomic.LoadInt32(&convertCount); got != 1 {
+		t.Errorf("expected singleflight to coalesce into 1 upstream call, got %d", got)
 	}
 }

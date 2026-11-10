@@ -711,9 +711,22 @@ async function handleStreamFile(request: Request, env: Env): Promise<Response> {
     // 构建响应
     const responseHeaders = new Headers();
     responseHeaders.set('Content-Type', mimeType);
-    responseHeaders.set('Content-Length', String(fileSize));
+
+    // 优先采用上游返回的 Content-Length 与 Content-Range（特别是 Range 请求返回 206 时）
+    const upstreamLength = fileResp.headers.get('Content-Length');
+    if (upstreamLength) {
+      responseHeaders.set('Content-Length', upstreamLength);
+    } else if (fileSize > 0) {
+      responseHeaders.set('Content-Length', String(fileSize));
+    }
+
+    const upstreamRange = fileResp.headers.get('Content-Range');
+    if (upstreamRange) {
+      responseHeaders.set('Content-Range', upstreamRange);
+    }
+
     responseHeaders.set('Accept-Ranges', 'bytes');
-    responseHeaders.set('Cache-Control', 'public, max-age=86400');
+    responseHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('X-Served-By-Bot', botName || '');
 
