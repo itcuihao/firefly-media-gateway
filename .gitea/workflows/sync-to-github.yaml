@@ -1,0 +1,32 @@
+name: Release Push to GitHub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  check-and-push:
+    name: Check Release and Push to GitHub
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.head_commit.message, 'release:') ||
+      startsWith(github.event.head_commit.message, 'release(') ||
+      contains(github.event.head_commit.message, '[release]')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Safe Push to GitHub
+        env:
+          GITHUB_PAT: ${{ secrets.GH_PAT_TOKEN }}
+        run: |
+          echo "Trigger event: ${{ github.event_name }}"
+          echo "Commit message: ${{ github.event.head_commit.message }}"
+          echo "Syncing main branch to GitHub (itcuihao/firefly-media-gateway)..."
+          git push https://x-access-token:${GITHUB_PAT}@github.com/itcuihao/firefly-media-gateway.git main:main
+          echo "✅ Successfully synced to GitHub! GitHub Actions will handle tag creation and deployment."
