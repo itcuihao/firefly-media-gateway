@@ -89,6 +89,13 @@ jobs:
             NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
           fi
 
+          # 自动防重自愈机制：若计算出的 Tag 已存在，自动平滑递增 Patch 直至不冲突
+          while git rev-parse -q --verify "refs/tags/$NEW_TAG" >/dev/null 2>&1; do
+            echo "⚠️ Tag $NEW_TAG 线上已存在，自动递增 Patch 版本..."
+            PATCH=$((PATCH + 1))
+            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          done
+
           echo "Generated next tag: $NEW_TAG"
           echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 

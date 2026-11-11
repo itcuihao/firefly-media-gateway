@@ -28,5 +28,5 @@ jobs:
           echo "Trigger event: ${{ github.event_name }}"
           echo "Commit message: ${{ github.event.head_commit.message }}"
           echo "Syncing main branch to GitHub (itcuihao/firefly-media-gateway)..."
-          git push --force https://x-access-token:${GITHUB_PAT}@github.com/itcuihao/firefly-media-gateway.git main:main
+          git push https://x-access-token:${GITHUB_PAT}@github.com/itcuihao/firefly-media-gateway.git main:main
           echo "✅ Successfully synced to GitHub! GitHub Actions will handle tag creation and deployment."
