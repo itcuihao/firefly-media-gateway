@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net/http"
@@ -17,9 +21,11 @@ import (
 	"firefly-media-gateway/internal/provider"
 
 	qtfaststart "github.com/qkzsky/go-qt-faststart"
+	_ "golang.org/x/image/webp"
 )
 
 const (
+	minImageSizeBytes int64 = 100                 // 100 bytes minimum to reject 1x1 transparent dummy PNGs (e.g. 67B) and empty files
 	maxImageSizeBytes int64 = 10 * 1024 * 1024   // 10MB for images
 	maxVideoSizeBytes int64 = 2000 * 1024 * 1024 // 2GB limit for videos
 	maxAudioSizeBytes int64 = 50 * 1024 * 1024   // 50MB for audio
@@ -95,9 +101,24 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		return Asset{}, err
 	}
 
-	// Validate size limits
-	if mediaKind == "image" && sizeBytes > maxImageSizeBytes {
-		return Asset{}, fmt.Errorf("image exceeds %d bytes: %w", maxImageSizeBytes, ErrFileTooLarge)
+	// Validate size limits and image sanity
+	if mediaKind == "image" {
+		if sizeBytes < minImageSizeBytes {
+			return Asset{}, fmt.Errorf("image file too small (%d bytes, min %d bytes required), empty or 1x1 dummy placeholders are rejected: %w", sizeBytes, minImageSizeBytes, ErrInvalidFileType)
+		}
+		if sizeBytes > maxImageSizeBytes {
+			return Asset{}, fmt.Errorf("image exceeds %d bytes: %w", maxImageSizeBytes, ErrFileTooLarge)
+		}
+
+		// Decode dimensions to reject 1x1 dummy/placeholder images
+		if cfg, _, err := image.DecodeConfig(tmpFile); err == nil {
+			if cfg.Width <= 1 && cfg.Height <= 1 {
+				return Asset{}, fmt.Errorf("image dimensions too small (%dx%d), 1x1 dummy placeholders are rejected: %w", cfg.Width, cfg.Height, ErrInvalidFileType)
+			}
+		}
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return Asset{}, fmt.Errorf("seek tmpFile failed: %w", err)
+		}
 	}
 	if mediaKind == "video" && sizeBytes > maxVideoSizeBytes {
 		return Asset{}, fmt.Errorf("video exceeds %d bytes: %w", maxVideoSizeBytes, ErrFileTooLarge)

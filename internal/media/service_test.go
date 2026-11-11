@@ -1,9 +1,11 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"firefly-media-gateway/internal/provider"
@@ -242,9 +244,9 @@ func TestUploadDeduplication(t *testing.T) {
 	var r emptyReader
 	result, err := svc.Upload(context.Background(), UploadRequest{
 		Project:             "proj",
-		Usage:               "cover",
-		FileName:            "test.jpg",
-		DeclaredContentType: "image/jpeg",
+		Usage:               "file",
+		FileName:            "test.pdf",
+		DeclaredContentType: "application/pdf",
 		Reader:              r,
 	})
 	if err != nil {
@@ -256,6 +258,36 @@ func TestUploadDeduplication(t *testing.T) {
 	}
 	if result.ProviderFileID != existingAsset.ProviderFileID {
 		t.Fatalf("expected reused ProviderFileID %s, got %s", existingAsset.ProviderFileID, result.ProviderFileID)
+	}
+}
+
+func TestUploadRejectTinyDummyImage(t *testing.T) {
+	repo := &fakeRepository{}
+	p := &fakeProvider{name: "fake"}
+	svc := NewService(repo, map[string]provider.StorageProvider{"fake": p}, "fake", "http://example.test")
+
+	// 67-byte 1x1 transparent PNG
+	dummy1x1PNG := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+		0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+		0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+	}
+
+	_, err := svc.Upload(context.Background(), UploadRequest{
+		Project:             "proj",
+		Usage:               "cover",
+		FileName:            "dummy.png",
+		DeclaredContentType: "image/png",
+		Reader:              bytes.NewReader(dummy1x1PNG),
+	})
+	if err == nil {
+		t.Fatalf("expected error rejecting 67-byte 1x1 dummy PNG, got nil")
+	}
+	if !strings.Contains(err.Error(), "too small") {
+		t.Errorf("expected 'too small' error, got %v", err)
 	}
 }
 

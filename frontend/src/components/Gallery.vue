@@ -251,18 +251,24 @@ onMounted(() => {
     <div v-else-if="filteredAssets.length > 0" class="masonry-wrapper">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)">
         <div class="masonry-thumb">
-          <!-- Loaded Image -->
+          <!-- Loaded Image (> 100 bytes) -->
           <img 
-            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && !failedImages[asset.mediaId]" 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
             :src="asset.publicUrl" 
             alt="preview" 
             loading="lazy"
             @error="onImageError(asset.mediaId)" 
           />
-          <!-- Broken / Placeholder Fallback -->
+          <!-- 1x1 / Empty Dummy Placeholder Image (e.g. 67B transparent PNGs) -->
+          <div v-else-if="asset.mimeType.startsWith('image/') && asset.sizeBytes <= 100" class="thumb-fallback thumb-dummy">
+            <span class="material-symbols-rounded fallback-icon" style="color: rgba(0, 229, 255, 0.45);">crop_square</span>
+            <span class="fallback-text">占位图 ({{ formatBytes(asset.sizeBytes) }})</span>
+            <span class="fallback-sub">1x1 占位透明图</span>
+          </div>
+          <!-- Broken / Network Error Fallback -->
           <div v-else-if="failedImages[asset.mediaId]" class="thumb-fallback">
             <span class="material-symbols-rounded fallback-icon">broken_image</span>
-            <span class="fallback-text">预览图无法加载</span>
+            <span class="fallback-text">预览图加载失败</span>
             <span class="fallback-sub">({{ formatBytes(asset.sizeBytes) }})</span>
           </div>
           <!-- HEIC -->

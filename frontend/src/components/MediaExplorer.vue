@@ -443,12 +443,16 @@ onMounted(() => {
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
           <img 
-            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && !failedImages[asset.mediaId]" 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
             :src="asset.publicUrl" 
             alt="preview" 
             loading="lazy"
             @error="onImageError(asset.mediaId)" 
           />
+          <div v-else-if="asset.mimeType.startsWith('image/') && asset.sizeBytes <= 100" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:4px; padding:12px; background: rgba(0,0,0,0.3);">
+            <span class="material-symbols-rounded" style="font-size: 28px; color: rgba(0, 229, 255, 0.45);">crop_square</span>
+            <span style="font-size: 10px; color: rgba(255,255,255,0.45);">1x1 占位图</span>
+          </div>
           <div v-else-if="failedImages[asset.mediaId]" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:6px; padding:12px; background: rgba(0,0,0,0.3);">
             <span class="material-symbols-rounded" style="font-size: 32px; color: rgba(255,255,255,0.25);">broken_image</span>
             <span style="font-size: 10px; color: rgba(255,255,255,0.45);">未加载预览</span>
@@ -522,7 +526,14 @@ onMounted(() => {
           <tr v-for="asset in filteredAssets" :key="asset.mediaId">
             <td>
               <div style="width: 40px; height: 40px; border-radius: 8px; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; overflow: hidden;">
-                <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active'" :src="asset.publicUrl" style="width: 100%; height: 100%; object-fit: cover;" />
+                <img 
+                  v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
+                  :src="asset.publicUrl" 
+                  style="width: 100%; height: 100%; object-fit: cover;" 
+                  @error="onImageError(asset.mediaId)" 
+                />
+                <span v-else-if="asset.mimeType.startsWith('image/') && asset.sizeBytes <= 100" class="material-symbols-rounded" style="font-size: 20px; color: rgba(0, 229, 255, 0.45);" title="1x1 占位透明图">crop_square</span>
+                <span v-else-if="failedImages[asset.mediaId]" class="material-symbols-rounded" style="font-size: 20px; color: rgba(255,255,255,0.25);" title="预览图加载失败">broken_image</span>
                 <span v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" class="material-symbols-rounded" style="font-size: 20px; color: #fbbf24;" title="HEIC 格式图片">image</span>
                 <video v-else-if="asset.mimeType.startsWith('video/') && asset.status === 'active'" :src="asset.publicUrl" preload="metadata" muted playsinline style="width: 100%; height: 100%; object-fit: cover;"></video>
                 <span v-else-if="asset.mimeType.startsWith('audio/')" class="material-symbols-rounded" style="font-size: 20px; color: #d8b4fe;">music_note</span>
