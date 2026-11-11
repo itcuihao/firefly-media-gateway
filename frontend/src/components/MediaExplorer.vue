@@ -35,6 +35,12 @@ const totalPages = computed(() => Math.ceil(totalCount.value / pageSize.value))
 const sheetActive = ref(false)
 const activeAsset = ref<MediaAsset | null>(null)
 
+// Track broken image URLs
+const failedImages = ref<Record<string, boolean>>({})
+function onImageError(mediaId: string) {
+  failedImages.value[mediaId] = true
+}
+
 // Upload Modal state
 const uploadDialogOpen = ref(false)
 const uploadProject = ref('interactive-video')
@@ -436,7 +442,17 @@ onMounted(() => {
     <div v-if="layoutMode === 'grid' && filteredAssets.length > 0" class="media-grid">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
-          <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active'" :src="asset.publicUrl" alt="preview" loading="lazy" />
+          <img 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && !failedImages[asset.mediaId]" 
+            :src="asset.publicUrl" 
+            alt="preview" 
+            loading="lazy"
+            @error="onImageError(asset.mediaId)" 
+          />
+          <div v-else-if="failedImages[asset.mediaId]" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:6px; padding:12px; background: rgba(0,0,0,0.3);">
+            <span class="material-symbols-rounded" style="font-size: 32px; color: rgba(255,255,255,0.25);">broken_image</span>
+            <span style="font-size: 10px; color: rgba(255,255,255,0.45);">未加载预览</span>
+          </div>
           <div v-else-if="asset.mimeType === 'image/heic' && asset.status === 'active'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:4px; padding:12px;">
             <span class="material-symbols-rounded" style="font-size: 36px; color: #fbbf24;">image</span>
             <span style="font-size: 10px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 原图</span>

@@ -28,6 +28,12 @@ const hasMore = computed(() => assets.value.length < totalCount.value)
 const activeAsset = ref<MediaAsset | null>(null)
 const detailsOpen = ref(false)
 
+// Track broken image URLs to display graceful fallback placeholders
+const failedImages = ref<Record<string, boolean>>({})
+function onImageError(mediaId: string) {
+  failedImages.value[mediaId] = true
+}
+
 // Debounce search input
 let debounceTimer: any = null
 watch(searchQueryInput, (newVal) => {
@@ -206,16 +212,22 @@ onMounted(() => {
     <!-- Filter bar -->
     <div class="m3-card media-filter-bar">
       <div class="filter-inputs">
-        <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或项目标签..." />
-        <select class="filter-input" v-model="selectedProject">
+        <div class="search-input-wrapper">
+          <span class="material-symbols-rounded search-icon">search</span>
+          <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或项目标签..." />
+          <button v-if="searchQueryInput" class="clear-search-btn" @click="searchQueryInput = ''" title="清空搜索">
+            <span class="material-symbols-rounded">close</span>
+          </button>
+        </div>
+        <select class="filter-input select-filter" v-model="selectedProject">
           <option value="">全部项目 (Projects)</option>
           <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
         </select>
-        <select class="filter-input" v-model="selectedUsage">
+        <select class="filter-input select-filter" v-model="selectedUsage">
           <option value="">全部用途 (Usages)</option>
           <option v-for="u in usagesList" :key="u" :value="u">{{ u }}</option>
         </select>
-        <select class="filter-input" v-model="mediaTypeFilter">
+        <select class="filter-input select-filter" v-model="mediaTypeFilter">
           <option value="">全部类别</option>
           <option value="image">图片类</option>
           <option value="video">视频类</option>
@@ -224,8 +236,8 @@ onMounted(() => {
         </select>
       </div>
 
-      <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="fetchAssets(true)" :disabled="loading">
-        <span class="material-symbols-rounded" style="font-size: 16px;">refresh</span>
+      <button class="m3-btn m3-btn-secondary m3-btn-sm refresh-btn" @click="fetchAssets(true)" :disabled="loading">
+        <span :class="['material-symbols-rounded', { 'rotate-sync': loading }]" style="font-size: 16px;">refresh</span>
         <span>刷新列表</span>
       </button>
     </div>
@@ -239,33 +251,59 @@ onMounted(() => {
     <div v-else-if="filteredAssets.length > 0" class="masonry-wrapper">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)">
         <div class="masonry-thumb">
-          <img v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic'" :src="asset.publicUrl" alt="preview" loading="lazy" />
-          <div v-else-if="asset.mimeType === 'image/heic'" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
-            <span class="material-symbols-rounded" style="font-size: 48px; color: #fbbf24;">image</span>
-            <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant));">HEIC 格式原图</span>
+          <!-- Loaded Image -->
+          <img 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && !failedImages[asset.mediaId]" 
+            :src="asset.publicUrl" 
+            alt="preview" 
+            loading="lazy"
+            @error="onImageError(asset.mediaId)" 
+          />
+          <!-- Broken / Placeholder Fallback -->
+          <div v-else-if="failedImages[asset.mediaId]" class="thumb-fallback">
+            <span class="material-symbols-rounded fallback-icon">broken_image</span>
+            <span class="fallback-text">预览图无法加载</span>
+            <span class="fallback-sub">({{ formatBytes(asset.sizeBytes) }})</span>
           </div>
+          <!-- HEIC -->
+          <div v-else-if="asset.mimeType === 'image/heic'" class="thumb-fallback thumb-heic">
+            <span class="material-symbols-rounded fallback-icon" style="color: #fbbf24;">image</span>
+            <span class="fallback-text">HEIC 格式原图</span>
+          </div>
+          <!-- Video -->
           <video v-else-if="asset.mimeType.startsWith('video/')" :src="asset.publicUrl" preload="metadata" muted playsinline></video>
-          <div v-else-if="asset.mimeType.startsWith('audio/')" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:8px;">
-            <span class="material-symbols-rounded" style="font-size: 48px; color: #d8b4fe;">music_note</span>
+          <!-- Audio -->
+          <div v-else-if="asset.mimeType.startsWith('audio/')" class="thumb-fallback thumb-audio">
+            <span class="material-symbols-rounded fallback-icon" style="color: #d8b4fe;">music_note</span>
             <audio :src="asset.publicUrl" controls style="width:100%; max-width:240px;"></audio>
           </div>
-          <span v-else class="material-symbols-rounded">description</span>
+          <!-- Other File Types -->
+          <div v-else class="thumb-fallback">
+            <span class="material-symbols-rounded fallback-icon" style="color: hsl(var(--md-sys-color-primary));">description</span>
+            <span class="fallback-text">{{ asset.mimeType || '未知格式' }}</span>
+          </div>
 
           <span v-if="asset.mimeType.startsWith('image/')" class="media-badge media-type-image">
-            <span class="material-symbols-rounded" style="font-size: 12px;">image</span>
+            <span class="material-symbols-rounded" style="font-size: 13px;">image</span>
           </span>
           <span v-else-if="asset.mimeType.startsWith('video/')" class="media-badge media-type-video">
-            <span class="material-symbols-rounded" style="font-size: 12px;">play_arrow</span>
+            <span class="material-symbols-rounded" style="font-size: 13px;">play_arrow</span>
           </span>
-          <span v-else-if="asset.mimeType.startsWith('audio/')" class="media-badge" style="background: rgba(168,85,247,0.25); color: #d8b4fe;">
-            <span class="material-symbols-rounded" style="font-size: 12px;">headphones</span>
+          <span v-else-if="asset.mimeType.startsWith('audio/')" class="media-badge" style="background: rgba(168,85,247,0.3); color: #d8b4fe;">
+            <span class="material-symbols-rounded" style="font-size: 13px;">headphones</span>
           </span>
         </div>
         <div class="masonry-info">
-          <div class="masonry-title">{{ asset.mediaId }}</div>
+          <div class="masonry-title" :title="asset.mediaId">
+            <span class="title-hash">{{ asset.mediaId.slice(0, 10) }}...{{ asset.mediaId.slice(-6) }}</span>
+            <button class="title-copy-btn" @click.stop="copyText(asset.mediaId, '资源 ID')" title="复制资源 ID">
+              <span class="material-symbols-rounded">content_copy</span>
+            </button>
+          </div>
           <div class="masonry-meta">
-            <span>{{ formatBytes(asset.sizeBytes) }}</span>
-            <span>{{ asset.project }}</span>
+            <span class="meta-pill size-pill">{{ formatBytes(asset.sizeBytes) }}</span>
+            <span v-if="asset.usage" class="meta-pill usage-pill">{{ asset.usage }}</span>
+            <span class="meta-pill project-pill">{{ asset.project }}</span>
           </div>
         </div>
       </div>
@@ -436,28 +474,89 @@ onMounted(() => {
   }
 }
 
+/* Search & Filter Bar Enhancements */
+.search-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 240px;
+}
+
+.search-input-wrapper .search-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+}
+
+.search-input-wrapper .filter-input.search-field {
+  padding-left: 38px;
+  padding-right: 32px;
+  width: 100%;
+}
+
+.search-input-wrapper .clear-search-btn {
+  position: absolute;
+  right: 10px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 50%;
+  transition: all 0.15s ease;
+}
+
+.search-input-wrapper .clear-search-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.search-input-wrapper .clear-search-btn .material-symbols-rounded {
+  font-size: 14px;
+}
+
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
 .masonry-card {
   break-inside: avoid;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 16px;
+  background: rgba(18, 25, 32, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 14px;
   margin-bottom: 20px;
   overflow: hidden;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  transition: all 0.25s cubic-bezier(0.2, 0, 0, 1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
 .masonry-card:hover {
   transform: translateY(-4px);
-  border-color: rgba(0, 229, 255, 0.25);
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: var(--elevation-2);
+  border-color: rgba(0, 229, 255, 0.35);
+  background: rgba(22, 32, 42, 0.85);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 229, 255, 0.15);
 }
 
 .masonry-thumb {
   position: relative;
   width: 100%;
-  background: #0d1216;
+  background: #090d10;
+  min-height: 120px;
   max-height: 360px;
   overflow: hidden;
   display: flex;
@@ -468,14 +567,48 @@ onMounted(() => {
 .masonry-thumb img, .masonry-thumb video {
   width: 100%;
   height: auto;
+  min-height: 120px;
   object-fit: contain;
   display: block;
 }
 
-.masonry-thumb span.material-symbols-rounded {
-  font-size: 48px;
-  color: hsl(var(--md-sys-color-primary));
-  padding: 40px 0;
+/* Fallback / Broken Placeholder */
+.thumb-fallback {
+  width: 100%;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, rgba(0, 0, 0, 0.25) 100%);
+  padding: 24px 12px;
+  user-select: none;
+}
+
+.thumb-fallback .fallback-icon {
+  font-size: 36px;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.thumb-fallback .fallback-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 0.3px;
+}
+
+.thumb-fallback .fallback-sub {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.thumb-fallback.thumb-heic {
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.05) 0%, rgba(0, 0, 0, 0.25) 100%);
+}
+
+.thumb-fallback.thumb-audio {
+  background: linear-gradient(180deg, rgba(168, 85, 247, 0.05) 0%, rgba(0, 0, 0, 0.25) 100%);
 }
 
 .media-badge {
@@ -500,25 +633,86 @@ onMounted(() => {
 }
 
 .masonry-info {
-  padding: 14px;
+  padding: 12px 14px;
   text-align: left;
 }
 
 .masonry-title {
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 600;
   color: #fff;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.title-hash {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  letter-spacing: -0.2px;
+}
+
+.title-copy-btn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.3);
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.title-copy-btn:hover {
+  color: hsl(var(--md-sys-color-primary));
+  background: rgba(0, 229, 255, 0.1);
+}
+
+.title-copy-btn .material-symbols-rounded {
+  font-size: 14px;
 }
 
 .masonry-meta {
   display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: hsl(var(--md-sys-color-on-surface-variant));
-  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.size-pill {
+  font-family: 'JetBrains Mono', monospace;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.project-pill {
+  background: rgba(0, 229, 255, 0.08);
+  color: hsl(var(--md-sys-color-primary));
+  border-color: rgba(0, 229, 255, 0.2);
+}
+
+.usage-pill {
+  background: rgba(168, 85, 247, 0.08);
+  color: #d8b4fe;
+  border-color: rgba(168, 85, 247, 0.2);
 }
 
 /* Share Dialog specifics */
