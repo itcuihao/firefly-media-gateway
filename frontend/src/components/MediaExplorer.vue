@@ -94,13 +94,11 @@ const dragOver = ref(false)
 
 const uploadUsageOptions = computed(() => {
   if (selectedFileKind.value === 'image') {
-    const defaultImgUsages = ['cover', 'scene', 'avatar']
-    const otherUsages = usagesList.value.filter(u => !defaultImgUsages.includes(u))
     return [
       { label: 'cover (封面大图)', value: 'cover' },
       { label: 'scene (场景/正片)', value: 'scene' },
       { label: 'avatar (头像/缩略图)', value: 'avatar' },
-      ...otherUsages.map(u => ({ label: `${u} (现有用途)`, value: u }))
+      { label: 'file (通用文件)', value: 'file' }
     ]
   }
   if (selectedFileKind.value === 'audio') {

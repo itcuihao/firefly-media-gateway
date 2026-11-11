@@ -156,7 +156,13 @@ func (g *Gateway) isAuthorized(r *http.Request) bool {
 // parsePutKey 解析对象键为 project, usage, filename
 func parsePutKey(key string) (project, usage, filename string) {
 	key = strings.Trim(key, "/")
-	parts := strings.Split(key, "/")
+	rawParts := strings.Split(key, "/")
+	var parts []string
+	for _, p := range rawParts {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
 
 	validUsages := map[string]bool{
 		"cover":  true,
@@ -261,7 +267,15 @@ func (g *Gateway) resolveAssetID(ctx context.Context, r *http.Request, bucket, k
 	}
 
 	// 4. 按 project, usage, filename 模糊匹配已存在的活跃文件
-	parts := strings.Split(cleanKey, "/")
+	var parts []string
+	for _, p := range strings.Split(cleanKey, "/") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("empty key")
+	}
 	var project, usage, search string
 	if len(parts) >= 3 {
 		project = parts[0]

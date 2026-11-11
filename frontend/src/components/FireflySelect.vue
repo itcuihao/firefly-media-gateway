@@ -78,7 +78,7 @@ function selectOption(opt: SelectOption) {
   isOpen.value = false
 }
 
-function handleClear(e: MouseEvent) {
+function handleClear(e: Event) {
   e.stopPropagation()
   emit('update:modelValue', '')
   emit('change', '')
@@ -132,15 +132,18 @@ onUnmounted(() => {
 
       <!-- Action Icons (Clear / Arrow) -->
       <span class="select-actions">
-        <button 
+        <span 
           v-if="clearable && hasValue && !disabled" 
-          type="button" 
+          role="button"
+          tabindex="0"
           class="clear-btn" 
           @click="handleClear" 
+          @keydown.enter.prevent="handleClear"
+          @keydown.space.prevent="handleClear"
           title="清空选择"
         >
           <span class="material-symbols-rounded">close</span>
-        </button>
+        </span>
         <span class="material-symbols-rounded arrow-icon">expand_more</span>
       </span>
     </button>

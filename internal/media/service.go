@@ -104,7 +104,7 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 
 	// Validate size limits and image sanity
 	if mediaKind == "image" {
-		if sizeBytes < minImageSizeBytes {
+		if mimeType != "image/svg+xml" && sizeBytes < minImageSizeBytes {
 			return Asset{}, fmt.Errorf("image file too small (%d bytes, min %d bytes required), empty or 1x1 dummy placeholders are rejected: %w", sizeBytes, minImageSizeBytes, ErrInvalidFileType)
 		}
 		if sizeBytes > maxImageSizeBytes {
@@ -438,6 +438,9 @@ func (s *Service) ResolveAccessURL(ctx context.Context, id string) (string, erro
 	}
 	if asset.Status != StatusActive {
 		return "", ErrNotFound
+	}
+	if asset.IsChunked {
+		return fmt.Sprintf("%s/media/%s", s.publicBaseURL, asset.ID), nil
 	}
 	p, ok := s.providers[asset.Provider]
 	if !ok {
