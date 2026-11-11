@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, watch, inject } from 'vue'
 import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
 import type { MediaAsset } from '../api'
+import FireflySelect from './FireflySelect.vue'
 
 const props = defineProps({
   triggerUpload: Boolean
@@ -20,11 +21,44 @@ const searchQueryInput = ref('')
 const searchKeyword = ref('')
 const selectedProject = ref('')
 const selectedUsage = ref('')
-const showDeleted = ref(false)
+const mediaTypeFilter = ref('')
+const statusFilter = ref<'active' | 'deleted' | 'all'>('active')
 const hideDummy = ref(true)
 
 const projectsList = ref<string[]>([])
 const usagesList = ref<string[]>([])
+
+// Dropdown Options
+const projectOptions = computed(() => [
+  { label: '全部项目 (Projects)', value: '' },
+  ...projectsList.value.map(p => ({ label: p, value: p }))
+])
+
+const usageOptions = computed(() => [
+  { label: '全部用途 (Usages)', value: '' },
+  ...usagesList.value.map(u => ({ label: u, value: u }))
+])
+
+const mediaTypeOptions = [
+  { label: '全部类别 (Types)', value: '' },
+  { label: '图片类 (Image)', value: 'image', icon: 'image' },
+  { label: '视频类 (Video)', value: 'video', icon: 'play_arrow' },
+  { label: '音频类 (Audio)', value: 'audio', icon: 'headphones' },
+  { label: '文档/文件 (File)', value: 'file', icon: 'description' }
+]
+
+const statusOptions = [
+  { label: '活动正常 (Active)', value: 'active', icon: 'check_circle' },
+  { label: '已删除资源 (Deleted)', value: 'deleted', icon: 'delete' },
+  { label: '全部状态 (All)', value: 'all', icon: 'list' }
+]
+
+const pageSizeOptions = [
+  { label: '10 条/页', value: 10 },
+  { label: '20 条/页', value: 20 },
+  { label: '50 条/页', value: 50 },
+  { label: '100 条/页', value: 100 }
+]
 
 // Pagination
 const currentPage = ref(1)
@@ -50,13 +84,41 @@ function onImageLoad(mediaId: string) {
 
 // Upload Modal state
 const uploadDialogOpen = ref(false)
-const uploadProject = ref('interactive-video')
+const uploadProject = ref('sheep')
 const uploadUsage = ref('cover')
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFileKind = ref<'image' | 'video' | 'audio' | 'file' | null>(null)
 const selectedFileName = ref('')
 const dragOver = ref(false)
+
+const uploadUsageOptions = computed(() => {
+  if (selectedFileKind.value === 'image') {
+    const defaultImgUsages = ['cover', 'scene', 'avatar']
+    const otherUsages = usagesList.value.filter(u => !defaultImgUsages.includes(u))
+    return [
+      { label: 'cover (封面大图)', value: 'cover' },
+      { label: 'scene (场景/正片)', value: 'scene' },
+      { label: 'avatar (头像/缩略图)', value: 'avatar' },
+      ...otherUsages.map(u => ({ label: `${u} (现有用途)`, value: u }))
+    ]
+  }
+  if (selectedFileKind.value === 'audio') {
+    return [
+      { label: 'audio (音频文件)', value: 'audio' },
+      { label: 'scene (场景音效)', value: 'scene' }
+    ]
+  }
+  if (selectedFileKind.value === 'file') {
+    return [
+      { label: 'file (普通文档与归档文件)', value: 'file' }
+    ]
+  }
+  return [
+    { label: 'cover (封面大图)', value: 'cover' },
+    { label: 'scene (场景/正片)', value: 'scene' }
+  ]
+})
 
 const sizeLimitHint = computed(() => {
   if (selectedFileKind.value === 'image') return '图片最大 10MB (jpg/png/webp/gif/svg/avif)'
@@ -160,8 +222,11 @@ async function fetchAssets() {
     if (selectedProject.value) params.set('project', selectedProject.value)
     if (selectedUsage.value) params.set('usage', selectedUsage.value)
     if (searchKeyword.value) params.set('search', searchKeyword.value)
-    if (showDeleted.value) {
+    if (mediaTypeFilter.value) params.set('type', mediaTypeFilter.value)
+    if (statusFilter.value === 'all') {
       params.set('status', 'all')
+    } else if (statusFilter.value === 'deleted') {
+      params.set('status', 'deleted')
     } else {
       params.set('status', 'active')
     }
@@ -186,7 +251,7 @@ async function fetchAssets() {
 }
 
 // Watch filters - reset to page 1
-watch([selectedProject, selectedUsage, showDeleted, hideDummy, searchKeyword, pageSize], () => {
+watch([selectedProject, selectedUsage, mediaTypeFilter, statusFilter, hideDummy, searchKeyword, pageSize], () => {
   currentPage.value = 1
   fetchAssets()
 })
@@ -403,6 +468,7 @@ watch(() => props.triggerUpload, (val) => {
 })
 
 onMounted(() => {
+  fetchMetadata()
   fetchAssets()
 })
 </script>
@@ -412,26 +478,33 @@ onMounted(() => {
     <!-- Filters Card -->
     <div class="m3-card media-filter-bar">
       <div class="filter-inputs">
-        <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或 MIME 格式..." />
-        <select class="filter-input" v-model="selectedProject">
-          <option value="">全部项目 (Projects)</option>
-          <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
-        </select>
-        <select class="filter-input" v-model="selectedUsage">
-          <option value="">全部用途 (Usages)</option>
-          <option v-for="u in usagesList" :key="u" :value="u">{{ u }}</option>
-        </select>
-        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-          <input type="checkbox" v-model="showDeleted" style="accent-color: hsl(var(--md-sys-color-primary));" />
-          <span>显示已删除资源</span>
-        </label>
-        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
-          <input type="checkbox" v-model="hideDummy" style="accent-color: hsl(var(--md-sys-color-primary));" />
-          <span>过滤空白占位图 (&lt;100B)</span>
-        </label>
+        <div class="search-input-wrapper">
+          <span class="material-symbols-rounded search-icon">search</span>
+          <input class="filter-input search-field" v-model="searchQueryInput" placeholder="搜索资源 ID 或项目标签..." />
+          <button v-if="searchQueryInput" class="clear-search-btn" @click="searchQueryInput = ''" title="清空搜索">
+            <span class="material-symbols-rounded">close</span>
+          </button>
+        </div>
+        <FireflySelect v-model="selectedProject" :options="projectOptions" placeholder="全部项目" clearable min-width="160px" />
+        <FireflySelect v-model="selectedUsage" :options="usageOptions" placeholder="全部用途" clearable min-width="160px" />
+        <FireflySelect v-model="mediaTypeFilter" :options="mediaTypeOptions" placeholder="全部类别" clearable min-width="150px" />
+        <FireflySelect v-model="statusFilter" :options="statusOptions" min-width="150px" />
+        <button 
+          :class="['filter-toggle-pill', { active: hideDummy }]" 
+          @click="hideDummy = !hideDummy" 
+          :title="hideDummy ? '已过滤 <100B 占位透明图，点击显示全量' : '当前展示全量，点击过滤占位透明图'"
+        >
+          <span class="material-symbols-rounded toggle-icon" style="font-size: 16px;">{{ hideDummy ? 'filter_alt' : 'filter_alt_off' }}</span>
+          <span>{{ hideDummy ? '已过滤占位图' : '全量展示' }}</span>
+        </button>
       </div>
 
-      <div style="display: flex; gap: 12px; align-items: center;">
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <button class="m3-btn m3-btn-primary m3-btn-sm" @click="openUploadDialog">
+          <span class="material-symbols-rounded" style="font-size: 16px;">cloud_upload</span>
+          <span>上传文件</span>
+        </button>
+
         <div class="view-toggle-btns">
           <button :class="['view-toggle-btn', { active: layoutMode === 'grid' }]" @click="setExplorerLayout('grid')">
             <span class="material-symbols-rounded" style="font-size: 18px;">grid_view</span>
@@ -443,8 +516,8 @@ onMounted(() => {
           </button>
         </div>
 
-        <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="fetchAssets">
-          <span class="material-symbols-rounded" style="font-size: 16px;">refresh</span>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="() => { fetchMetadata(); fetchAssets(); }" :disabled="loading">
+          <span :class="['material-symbols-rounded', { 'rotate-sync': loading }]" style="font-size: 16px;">refresh</span>
           <span>刷新</span>
         </button>
       </div>
@@ -602,12 +675,7 @@ onMounted(() => {
         <span style="color: rgba(255,255,255,0.15)">|</span>
         <div style="display: flex; align-items: center; gap: 6px;">
           <span>每页</span>
-          <select v-model="pageSize" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; color: #fff; padding: 4px 8px; font-size: 12px; outline: none; cursor: pointer;">
-            <option :value="10">10</option>
-            <option :value="20">20</option>
-            <option :value="50">50</option>
-          </select>
-          <span>条</span>
+          <FireflySelect v-model="pageSize" :options="pageSizeOptions" size="sm" min-width="105px" />
         </div>
       </div>
       
@@ -676,39 +744,22 @@ onMounted(() => {
           <template v-if="selectedFileKind">
             <div class="form-field">
               <label>所属项目 (Project)</label>
-              <div class="input-wrapper">
-                <input v-model="uploadProject" type="text" placeholder="如 myproject" />
+              <div class="input-wrapper" style="position: relative;">
+                <input v-model="uploadProject" type="text" list="explorer-upload-projects" placeholder="输入或选择所属项目，如 sheep" />
+                <datalist id="explorer-upload-projects">
+                  <option v-for="p in projectsList" :key="p" :value="p" />
+                </datalist>
               </div>
             </div>
 
-            <div v-if="selectedFileKind === 'image'" class="form-field">
+            <div class="form-field">
               <label>使用场景 (Usage)</label>
-              <div class="input-wrapper">
-                <select v-model="uploadUsage">
-                  <option value="cover">cover (封面大图)</option>
-                  <option value="scene">scene (场景/正片)</option>
-                  <option value="avatar">avatar (头像/缩略图)</option>
-                </select>
-              </div>
-            </div>
-
-            <div v-if="selectedFileKind === 'audio'" class="form-field">
-              <label>使用场景 (Usage)</label>
-              <div class="input-wrapper">
-                <select v-model="uploadUsage">
-                  <option value="audio">audio (音频文件)</option>
-                  <option value="scene">scene (场景音效)</option>
-                </select>
-              </div>
-            </div>
-
-            <div v-if="selectedFileKind === 'file'" class="form-field">
-              <label>使用场景 (Usage)</label>
-              <div class="input-wrapper">
-                <select v-model="uploadUsage">
-                  <option value="file">file (普通文档与归档文件)</option>
-                </select>
-              </div>
+              <FireflySelect 
+                v-model="uploadUsage" 
+                :options="uploadUsageOptions" 
+                placeholder="选择使用场景..." 
+                min-width="100%" 
+              />
             </div>
 
             <div v-if="selectedFileKind === 'image'" class="form-field">

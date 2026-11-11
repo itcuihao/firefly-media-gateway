@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, inject } from 'vue'
+import { ref, inject, computed } from 'vue'
 import { apiRequest } from '../api'
 import WorkerManager from './WorkerManager.vue'
+import FireflySelect from './FireflySelect.vue'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
@@ -13,6 +14,18 @@ const tgChatIdInput = ref(localStorage.getItem('media_gateway_tg_chat_id') || ''
 const tgShowToken = ref(false)
 const tgVerifyLoading = ref(false)
 const tgChatsLoading = ref(false)
+
+const tgChatOptions = computed(() => [
+  { label: '-- 选择群组 --', value: '' },
+  ...tgChats.value.map(chat => ({
+    label: `${chat.title} (${chat.type})`,
+    value: String(chat.id)
+  }))
+])
+
+function onSelectChat(val: string | number) {
+  if (val) tgChatIdInput.value = String(val)
+}
 const tgStatus = ref<'idle' | 'success' | 'error'>('idle')
 const tgStatusTitle = ref('未连接测试')
 const tgStatusDesc = ref('请点击左侧按钮进行通讯测试')
@@ -260,19 +273,15 @@ function copyText(txt: string) {
 
             <div class="form-field" style="margin-top: 16px;">
               <label>默认 Chat ID / 群组 ID</label>
-              <div class="input-wrapper" style="display: flex; gap: 10px;">
+              <div class="input-wrapper" style="display: flex; gap: 10px; align-items: center;">
                 <input v-model="tgChatIdInput" type="text" placeholder="例如：-1001234567890" style="flex: 1;" />
-                <select 
+                <FireflySelect 
                   v-if="tgChats.length > 0"
-                  @change="(e) => { tgChatIdInput = (e.target as HTMLSelectElement).value }"
-                  :value="tgChats.some(c => String(c.id) === tgChatIdInput) ? tgChatIdInput : ''"
-                  style="width: 200px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; color: #fff; padding: 12px; font-size: 14px; outline: none;"
-                >
-                  <option value="" style="background: #1e293b;">-- 选择群组 --</option>
-                  <option v-for="chat in tgChats" :key="chat.id" :value="String(chat.id)" style="background: #1e293b;">
-                    {{ chat.title }} ({{ chat.type }})
-                  </option>
-                </select>
+                  :model-value="tgChats.some(c => String(c.id) === tgChatIdInput) ? tgChatIdInput : ''"
+                  :options="tgChatOptions"
+                  @change="onSelectChat"
+                  min-width="200px"
+                />
               </div>
               <span style="font-size: 11px; color: hsl(var(--md-sys-color-on-surface-variant)); margin-top: 4px;">为空则默认加载后端 <code>TELEGRAM_CHAT_ID</code> 环境变量</span>
             </div>

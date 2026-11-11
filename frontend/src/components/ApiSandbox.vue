@@ -1,10 +1,20 @@
 <script setup lang="ts">
 import { ref, inject, computed } from 'vue'
 import { getApiBaseUrl, copyToClipboard } from '../api'
+import FireflySelect from './FireflySelect.vue'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
 const selectedApi = ref('health')
+
+const apiOptions = [
+  { label: 'GET /api/v1/health (健康检查)', value: 'health', icon: 'favorite' },
+  { label: 'GET /api/v1/media (文件列表)', value: 'list', icon: 'list' },
+  { label: 'GET /api/v1/media/{mediaId}/meta (媒体元数据)', value: 'meta', icon: 'info' },
+  { label: 'POST /api/v1/media/upload (上传媒体文件)', value: 'upload', icon: 'cloud_upload' },
+  { label: 'DELETE /api/v1/media/{mediaId} (删除媒体文件)', value: 'delete', icon: 'delete' },
+  { label: 'POST /api/v1/provider/telegram/chat-ids (获取TG群组)', value: 'telegram_chats', icon: 'forum' }
+]
 
 // Parameter states
 const sbLimit = ref('20')
@@ -494,16 +504,7 @@ async function runSandboxApi() {
         
         <div class="form-field">
           <label>选择调试 API</label>
-          <div class="input-wrapper">
-            <select id="sandboxApiSelector" v-model="selectedApi">
-              <option value="health">GET /api/v1/health (健康检查)</option>
-              <option value="list">GET /api/v1/media (文件列表)</option>
-              <option value="meta">GET /api/v1/media/{mediaId}/meta (媒体元数据)</option>
-              <option value="upload">POST /api/v1/media/upload (上传媒体文件)</option>
-              <option value="delete">DELETE /api/v1/media/{mediaId} (删除媒体文件)</option>
-              <option value="telegram_chats">POST /api/v1/provider/telegram/chat-ids (获取TG群组)</option>
-            </select>
-          </div>
+          <FireflySelect v-model="selectedApi" :options="apiOptions" min-width="100%" />
         </div>
 
         <!-- Dynamic parameters builder container -->

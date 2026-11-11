@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, watch, inject } from 'vue'
 import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
 import type { MediaAsset } from '../api'
+import FireflySelect from './FireflySelect.vue'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
 
@@ -18,6 +19,25 @@ const hideDummy = ref(true)
 
 const projectsList = ref<string[]>([])
 const usagesList = ref<string[]>([])
+
+// Dropdown Options
+const projectOptions = computed(() => [
+  { label: '全部项目 (Projects)', value: '' },
+  ...projectsList.value.map(p => ({ label: p, value: p }))
+])
+
+const usageOptions = computed(() => [
+  { label: '全部用途 (Usages)', value: '' },
+  ...usagesList.value.map(u => ({ label: u, value: u }))
+])
+
+const mediaTypeOptions = [
+  { label: '全部类别', value: '' },
+  { label: '图片类 (Image)', value: 'image', icon: 'image' },
+  { label: '视频类 (Video)', value: 'video', icon: 'play_arrow' },
+  { label: '音频类 (Audio)', value: 'audio', icon: 'headphones' },
+  { label: '文档/文件类 (File)', value: 'file', icon: 'description' }
+]
 
 // Pagination
 const PAGE_SIZE = 24
@@ -243,21 +263,9 @@ onUnmounted(() => {
             <span class="material-symbols-rounded">close</span>
           </button>
         </div>
-        <select class="filter-input select-filter" v-model="selectedProject">
-          <option value="">全部项目 (Projects)</option>
-          <option v-for="p in projectsList" :key="p" :value="p">{{ p }}</option>
-        </select>
-        <select class="filter-input select-filter" v-model="selectedUsage">
-          <option value="">全部用途 (Usages)</option>
-          <option v-for="u in usagesList" :key="u" :value="u">{{ u }}</option>
-        </select>
-        <select class="filter-input select-filter" v-model="mediaTypeFilter">
-          <option value="">全部类别</option>
-          <option value="image">图片类</option>
-          <option value="video">视频类</option>
-          <option value="audio">音频类</option>
-          <option value="file">文档/文件类</option>
-        </select>
+        <FireflySelect v-model="selectedProject" :options="projectOptions" placeholder="全部项目" clearable min-width="160px" />
+        <FireflySelect v-model="selectedUsage" :options="usageOptions" placeholder="全部用途" clearable min-width="160px" />
+        <FireflySelect v-model="mediaTypeFilter" :options="mediaTypeOptions" placeholder="全部类别" clearable min-width="150px" />
         <button 
           :class="['filter-toggle-pill', { active: hideDummy }]" 
           @click="hideDummy = !hideDummy" 
