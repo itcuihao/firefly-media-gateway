@@ -185,6 +185,18 @@ onUnmounted(() => {
     </div>
   </div>
 
+  <!-- Ambient Firefly Aura & Floating Sparks Backdrop -->
+  <div class="firefly-aurora-bg" aria-hidden="true">
+    <div class="firefly-mesh-cyan"></div>
+    <div class="firefly-mesh-amber"></div>
+    <div class="firefly-mesh-emerald"></div>
+    <div class="firefly-spark spark-1"></div>
+    <div class="firefly-spark spark-2"></div>
+    <div class="firefly-spark spark-3"></div>
+    <div class="firefly-spark spark-4"></div>
+    <div class="firefly-spark spark-5"></div>
+  </div>
+
   <!-- Main M3 Layout -->
   <div class="app-layout">
     
@@ -204,6 +216,12 @@ onUnmounted(() => {
       </div>
       <ul class="nav-menu">
         <template v-if="isLoggedIn">
+          <li>
+            <button :class="['nav-item', { active: activeTab === 'gallery' }]" @click="switchTab('gallery')">
+              <span class="material-symbols-rounded">photo_library</span>
+              <span>瀑布流画廊</span>
+            </button>
+          </li>
           <li>
             <button :class="['nav-item', { active: activeTab === 'dashboard' }]" @click="switchTab('dashboard')">
               <span class="material-symbols-rounded">dashboard</span>
@@ -257,7 +275,8 @@ onUnmounted(() => {
           </div>
 
           <div v-else class="page-title" id="pageTitle">
-            <span v-if="activeTab === 'dashboard'">仪表盘总览</span>
+            <span v-if="activeTab === 'gallery'">瀑布流画廊</span>
+            <span v-else-if="activeTab === 'dashboard'">仪表盘总览</span>
             <span v-else-if="activeTab === 'explorer'">媒体库管理器</span>
             <span v-else-if="activeTab === 'verifier'">通道与节点管理</span>
             <span v-else-if="activeTab === 'sandbox'">API 联调沙盒</span>

@@ -100,3 +100,71 @@ func TestSQLiteRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("want 0 chunks after delete, got %d", len(gotChunks))
 	}
 }
+
+func TestSQLiteRepositoryHideDummy(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if err := EnsureSQLiteSchema(ctx, db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	repo := NewSQLiteRepository(db)
+	sha1 := "dummy-sha-67"
+	sha2 := "real-sha-2k"
+
+	// Insert a 67-byte dummy image and a 2048-byte real image
+	_, err = repo.Create(ctx, media.CreateAssetInput{
+		ID:        "dummy-67b",
+		Provider:  "tg",
+		PublicURL: "https://example.com/dummy.png",
+		MIMEType:  "image/png",
+		SizeBytes: 67,
+		SHA256:    &sha1,
+	})
+	if err != nil {
+		t.Fatalf("create dummy: %v", err)
+	}
+
+	_, err = repo.Create(ctx, media.CreateAssetInput{
+		ID:        "real-2kb",
+		Provider:  "tg",
+		PublicURL: "https://example.com/real.png",
+		MIMEType:  "image/png",
+		SizeBytes: 2048,
+		SHA256:    &sha2,
+	})
+	if err != nil {
+		t.Fatalf("create real: %v", err)
+	}
+
+	// List with HideDummy = true
+	list, err := repo.List(ctx, media.ListFilter{Limit: 10, HideDummy: true})
+	if err != nil {
+		t.Fatalf("list with HideDummy: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "real-2kb" {
+		t.Fatalf("expected only real-2kb, got %v", list)
+	}
+
+	count, err := repo.Count(ctx, media.ListFilter{HideDummy: true})
+	if err != nil {
+		t.Fatalf("count with HideDummy: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected count 1 with HideDummy, got %d", count)
+	}
+
+	// List with HideDummy = false
+	listAll, err := repo.List(ctx, media.ListFilter{Limit: 10, HideDummy: false})
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(listAll) != 2 {
+		t.Fatalf("expected 2 items with HideDummy=false, got %d", len(listAll))
+	}
+}

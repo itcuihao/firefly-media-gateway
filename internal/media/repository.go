@@ -12,6 +12,7 @@ type ListFilter struct {
 	Status       string // 'active' | 'deleted' | ""
 	OnlyPublic   bool
 	PrivateRules []string
+	HideDummy    bool
 }
 
 type Repository interface {

@@ -902,6 +902,14 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		PrivateRules: s.privateRules,
 	}
 
+	// Hide dummy (< 100 bytes) images: default to true unless explicitly disabled with hide_dummy=false/0
+	hideDummyVal := r.URL.Query().Get("hide_dummy")
+	hideDummy := true
+	if hideDummyVal == "false" || hideDummyVal == "0" {
+		hideDummy = false
+	}
+	filter.HideDummy = hideDummy
+
 	// Status filtering based on auth and parameter
 	status := r.URL.Query().Get("status")
 	if !hasAuth {

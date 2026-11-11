@@ -172,6 +172,9 @@ WHERE 1=1
 			args = append(args, filter.MediaType+"/%")
 		}
 	}
+	if filter.HideDummy {
+		sb.WriteString(" AND size_bytes > 100")
+	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
 		hasAll := false
@@ -256,6 +259,9 @@ func (r *SQLiteRepository) Count(ctx context.Context, filter media.ListFilter) (
 			sb.WriteString(" AND mime_type LIKE ?")
 			args = append(args, filter.MediaType+"/%")
 		}
+	}
+	if filter.HideDummy {
+		sb.WriteString(" AND size_bytes > 100")
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {

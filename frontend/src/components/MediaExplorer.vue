@@ -21,6 +21,7 @@ const searchKeyword = ref('')
 const selectedProject = ref('')
 const selectedUsage = ref('')
 const showDeleted = ref(false)
+const hideDummy = ref(true)
 
 const projectsList = ref<string[]>([])
 const usagesList = ref<string[]>([])
@@ -39,6 +40,12 @@ const activeAsset = ref<MediaAsset | null>(null)
 const failedImages = ref<Record<string, boolean>>({})
 function onImageError(mediaId: string) {
   failedImages.value[mediaId] = true
+}
+
+// Track successfully loaded images for progressive fade-in
+const loadedImages = ref<Record<string, boolean>>({})
+function onImageLoad(mediaId: string) {
+  loadedImages.value[mediaId] = true
 }
 
 // Upload Modal state
@@ -149,6 +156,7 @@ async function fetchAssets() {
     const params = new URLSearchParams()
     params.set('limit', String(pageSize.value))
     params.set('offset', String((currentPage.value - 1) * pageSize.value))
+    params.set('hide_dummy', hideDummy.value ? 'true' : 'false')
     if (selectedProject.value) params.set('project', selectedProject.value)
     if (selectedUsage.value) params.set('usage', selectedUsage.value)
     if (searchKeyword.value) params.set('search', searchKeyword.value)
@@ -178,7 +186,7 @@ async function fetchAssets() {
 }
 
 // Watch filters - reset to page 1
-watch([selectedProject, selectedUsage, showDeleted, searchKeyword, pageSize], () => {
+watch([selectedProject, selectedUsage, showDeleted, hideDummy, searchKeyword, pageSize], () => {
   currentPage.value = 1
   fetchAssets()
 })
@@ -417,6 +425,10 @@ onMounted(() => {
           <input type="checkbox" v-model="showDeleted" style="accent-color: hsl(var(--md-sys-color-primary));" />
           <span>显示已删除资源</span>
         </label>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; color: hsl(var(--md-sys-color-on-surface-variant));">
+          <input type="checkbox" v-model="hideDummy" style="accent-color: hsl(var(--md-sys-color-primary));" />
+          <span>过滤空白占位图 (&lt;100B)</span>
+        </label>
       </div>
 
       <div style="display: flex; gap: 12px; align-items: center;">
@@ -442,11 +454,22 @@ onMounted(() => {
     <div v-if="layoutMode === 'grid' && filteredAssets.length > 0" class="media-grid">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="media-card">
         <div class="media-thumb" @click="openDetailSheet(asset.mediaId)" style="cursor: pointer;">
+          <!-- Shimmer Skeleton while loading -->
+          <div 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && asset.sizeBytes > 100 && !loadedImages[asset.mediaId] && !failedImages[asset.mediaId]" 
+            class="thumb-skeleton"
+          >
+            <div class="shimmer-sweep"></div>
+            <span class="material-symbols-rounded skeleton-icon" style="font-size: 26px;">image</span>
+          </div>
+
           <img 
             v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.status === 'active' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
             :src="asset.publicUrl" 
+            :class="['media-grid-img', { 'is-loaded': loadedImages[asset.mediaId] }]"
             alt="preview" 
             loading="lazy"
+            @load="onImageLoad(asset.mediaId)"
             @error="onImageError(asset.mediaId)" 
           />
           <div v-else-if="asset.mimeType.startsWith('image/') && asset.sizeBytes <= 100" style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:4px; padding:12px; background: rgba(0,0,0,0.3);">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch, inject } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, inject } from 'vue'
 import { apiRequest, openMediaAsset, copyToClipboard } from '../api'
 import type { MediaAsset } from '../api'
 
@@ -14,12 +14,13 @@ const searchKeyword = ref('')
 const selectedProject = ref('')
 const selectedUsage = ref('')
 const mediaTypeFilter = ref('') // 'image' | 'video' | 'audio' | ''
+const hideDummy = ref(true)
 
 const projectsList = ref<string[]>([])
 const usagesList = ref<string[]>([])
 
 // Pagination
-const PAGE_SIZE = 20
+const PAGE_SIZE = 24
 const offset = ref(0)
 const totalCount = ref(0)
 const hasMore = computed(() => assets.value.length < totalCount.value)
@@ -32,6 +33,17 @@ const detailsOpen = ref(false)
 const failedImages = ref<Record<string, boolean>>({})
 function onImageError(mediaId: string) {
   failedImages.value[mediaId] = true
+}
+
+function retryImage(mediaId: string) {
+  failedImages.value[mediaId] = false
+  loadedImages.value[mediaId] = false
+}
+
+// Track successfully loaded images for silky smooth progressive fade-in
+const loadedImages = ref<Record<string, boolean>>({})
+function onImageLoad(mediaId: string) {
+  loadedImages.value[mediaId] = true
 }
 
 // Debounce search input
@@ -66,6 +78,7 @@ async function fetchAssets(reset = false) {
     const params = new URLSearchParams()
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String(offset.value))
+    params.set('hide_dummy', hideDummy.value ? 'true' : 'false')
     if (selectedProject.value) params.set('project', selectedProject.value)
     if (selectedUsage.value) params.set('usage', selectedUsage.value)
     if (searchKeyword.value) params.set('search', searchKeyword.value)
@@ -101,7 +114,7 @@ function loadMore() {
 }
 
 // Watch filters
-watch([selectedProject, selectedUsage, mediaTypeFilter, searchKeyword], () => {
+watch([selectedProject, selectedUsage, mediaTypeFilter, searchKeyword, hideDummy], () => {
   fetchAssets(true)
 })
 
@@ -201,9 +214,20 @@ function downloadMediaAsset(asset: MediaAsset) {
   a.click()
 }
 
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && detailsOpen.value) {
+    closeDetails()
+  }
+}
+
 onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
   fetchMetadata()
   fetchAssets(true)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
 })
 </script>
 
@@ -234,6 +258,14 @@ onMounted(() => {
           <option value="audio">音频类</option>
           <option value="file">文档/文件类</option>
         </select>
+        <button 
+          :class="['filter-toggle-pill', { active: hideDummy }]" 
+          @click="hideDummy = !hideDummy" 
+          :title="hideDummy ? '已过滤 <100B 占位透明图，点击显示全量' : '当前展示全量，点击过滤占位透明图'"
+        >
+          <span class="material-symbols-rounded toggle-icon" style="font-size: 16px;">{{ hideDummy ? 'filter_alt' : 'filter_alt_off' }}</span>
+          <span>{{ hideDummy ? '已过滤占位图' : '全量展示' }}</span>
+        </button>
       </div>
 
       <button class="m3-btn m3-btn-secondary m3-btn-sm refresh-btn" @click="fetchAssets(true)" :disabled="loading">
@@ -251,12 +283,23 @@ onMounted(() => {
     <div v-else-if="filteredAssets.length > 0" class="masonry-wrapper">
       <div v-for="asset in filteredAssets" :key="asset.mediaId" class="masonry-card" @click="openDetails(asset)">
         <div class="masonry-thumb">
-          <!-- Loaded Image (> 100 bytes) -->
+          <!-- Skeleton Shimmer Placeholder while loading -->
+          <div 
+            v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.sizeBytes > 100 && !loadedImages[asset.mediaId] && !failedImages[asset.mediaId]" 
+            class="thumb-skeleton"
+          >
+            <div class="shimmer-sweep"></div>
+            <span class="material-symbols-rounded skeleton-icon">image</span>
+          </div>
+
+          <!-- Progressive Smooth Loading Image (> 100 bytes) -->
           <img 
             v-if="asset.mimeType.startsWith('image/') && asset.mimeType !== 'image/heic' && asset.sizeBytes > 100 && !failedImages[asset.mediaId]" 
             :src="asset.publicUrl" 
+            :class="['masonry-img', { 'is-loaded': loadedImages[asset.mediaId] }]"
             alt="preview" 
             loading="lazy"
+            @load="onImageLoad(asset.mediaId)"
             @error="onImageError(asset.mediaId)" 
           />
           <!-- 1x1 / Empty Dummy Placeholder Image (e.g. 67B transparent PNGs) -->
@@ -266,10 +309,14 @@ onMounted(() => {
             <span class="fallback-sub">1x1 占位透明图</span>
           </div>
           <!-- Broken / Network Error Fallback -->
-          <div v-else-if="failedImages[asset.mediaId]" class="thumb-fallback">
+          <div v-else-if="failedImages[asset.mediaId]" class="thumb-fallback thumb-error">
             <span class="material-symbols-rounded fallback-icon">broken_image</span>
             <span class="fallback-text">预览图加载失败</span>
             <span class="fallback-sub">({{ formatBytes(asset.sizeBytes) }})</span>
+            <button class="retry-load-btn" @click.stop="retryImage(asset.mediaId)" title="重新加载">
+              <span class="material-symbols-rounded" style="font-size: 13px;">refresh</span>
+              <span>重试</span>
+            </button>
           </div>
           <!-- HEIC -->
           <div v-else-if="asset.mimeType === 'image/heic'" class="thumb-fallback thumb-heic">
@@ -537,43 +584,181 @@ onMounted(() => {
   transition: all 0.2s ease;
 }
 
+.filter-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.65);
+  padding: 6px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.filter-toggle-pill:hover {
+  background: rgba(0, 229, 255, 0.08);
+  border-color: rgba(0, 229, 255, 0.3);
+  color: #fff;
+}
+
+.filter-toggle-pill.active {
+  background: rgba(0, 229, 255, 0.12);
+  border-color: rgba(0, 229, 255, 0.4);
+  color: hsl(var(--md-sys-color-primary));
+  box-shadow: 0 0 12px -2px rgba(0, 229, 255, 0.2);
+}
+
+.filter-toggle-pill .toggle-icon {
+  font-size: 16px;
+}
+
+.retry-load-btn {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(0, 229, 255, 0.1);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  color: hsl(var(--md-sys-color-primary));
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.retry-load-btn:hover {
+  background: rgba(0, 229, 255, 0.2);
+  border-color: rgba(0, 229, 255, 0.5);
+  color: #fff;
+}
+
 .masonry-card {
   break-inside: avoid;
-  background: rgba(18, 25, 32, 0.7);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: linear-gradient(160deg, rgba(16, 25, 33, 0.75) 0%, rgba(8, 13, 17, 0.88) 100%);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 14px;
-  margin-bottom: 20px;
+  border-radius: 16px;
+  margin-bottom: 22px;
   overflow: hidden;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.2, 0, 0, 1);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  position: relative;
+  transition: transform 0.4s cubic-bezier(0.34, 1.4, 0.64, 1),
+              box-shadow 0.4s ease,
+              border-color 0.3s ease,
+              background 0.3s ease;
+  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.55), 
+              inset 0 1px 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.masonry-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0, 229, 255, 0.4), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: 2;
 }
 
 .masonry-card:hover {
-  transform: translateY(-4px);
-  border-color: rgba(0, 229, 255, 0.35);
-  background: rgba(22, 32, 42, 0.85);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 229, 255, 0.15);
+  transform: translateY(-8px) scale(1.015);
+  border-color: rgba(0, 229, 255, 0.45);
+  background: linear-gradient(160deg, rgba(22, 34, 44, 0.85) 0%, rgba(10, 16, 22, 0.94) 100%);
+  box-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.75),
+              0 0 32px -4px rgba(0, 229, 255, 0.25),
+              inset 0 1px 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.masonry-card:hover::before {
+  opacity: 1;
 }
 
 .masonry-thumb {
   position: relative;
   width: 100%;
-  background: #090d10;
-  min-height: 120px;
-  max-height: 360px;
+  background: #06090d;
+  min-height: 140px;
+  max-height: 380px;
   overflow: hidden;
   display: flex;
   justify-content: center;
   align-items: center;
 }
 
-.masonry-thumb img, .masonry-thumb video {
+/* Skeleton Loading Shimmer */
+.thumb-skeleton {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(14, 22, 28, 0.9) 0%, rgba(8, 12, 16, 0.95) 100%);
+  overflow: hidden;
+  z-index: 1;
+}
+
+.shimmer-sweep {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg, 
+    transparent 0%, 
+    rgba(0, 229, 255, 0.08) 50%, 
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: fireflyShimmer 1.8s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes fireflyShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.skeleton-icon {
+  font-size: 32px;
+  color: rgba(0, 229, 255, 0.22);
+  animation: fireflyPulse 2.2s infinite ease-in-out;
+}
+
+@keyframes fireflyPulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.95); }
+  50% { opacity: 0.75; transform: scale(1.05); }
+}
+
+.masonry-img {
   width: 100%;
   height: auto;
-  min-height: 120px;
+  min-height: 140px;
+  object-fit: contain;
+  display: block;
+  opacity: 0;
+  transform: scale(1.03);
+  filter: blur(8px);
+  transition: opacity 0.5s ease-out, transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), filter 0.5s ease-out;
+}
+
+.masonry-img.is-loaded {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
+}
+
+.masonry-thumb video {
+  width: 100%;
+  height: auto;
+  min-height: 140px;
   object-fit: contain;
   display: block;
 }

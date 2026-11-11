@@ -142,6 +142,9 @@ WHERE 1=1
 			argCount++
 		}
 	}
+	if filter.HideDummy {
+		sb.WriteString(" AND size_bytes > 100")
+	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
 		hasAll := false
@@ -236,6 +239,9 @@ func (r *PostgresRepository) Count(ctx context.Context, filter media.ListFilter)
 			args = append(args, filter.MediaType+"/%")
 			argCount++
 		}
+	}
+	if filter.HideDummy {
+		sb.WriteString(" AND size_bytes > 100")
 	}
 
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
