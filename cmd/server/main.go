@@ -57,11 +57,11 @@ func main() {
 	}
 
 	// 创建 S3 Gateway（可选）
-	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL)
+	s3Gateway := s3.NewGateway(svc, cfg.PublicBaseURL, cfg.AuthToken)
 
 	// 组合处理器
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/s3/") {
+		if r.URL.Path == "/s3" || strings.HasPrefix(r.URL.Path, "/s3/") {
 			s3Gateway.Handler().ServeHTTP(w, r)
 		} else {
 			h.Handler().ServeHTTP(w, r)

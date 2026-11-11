@@ -34,6 +34,7 @@ const (
 )
 
 type UploadRequest struct {
+	ID                  string // Optional: explicit 32-char hex asset ID
 	Project             string
 	Usage               string
 	FileName            string
@@ -132,7 +133,10 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 
 	// Check if file already exists in active assets (Soft Deduplication - Scheme B)
 	if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
-		assetID := newUUID()
+		assetID := req.ID
+		if assetID == "" {
+			assetID = newUUID()
+		}
 		ext := extByMIME(mimeType)
 		publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
 
@@ -211,7 +215,10 @@ func (s *Service) uploadSingle(ctx context.Context, p provider.StorageProvider, 
 		return Asset{}, fmt.Errorf("upload to provider %q failed: %w", p.Name(), err)
 	}
 
-	assetID := newUUID()
+	assetID := req.ID
+	if assetID == "" {
+		assetID = newUUID()
+	}
 	ext := extByMIME(mimeType)
 	publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
 
@@ -352,7 +359,10 @@ func (s *Service) uploadChunked(ctx context.Context, p provider.StorageProvider,
 		return Asset{}, fmt.Errorf("chunked upload failed: %w", firstErr)
 	}
 
-	assetID := newUUID()
+	assetID := req.ID
+	if assetID == "" {
+		assetID = newUUID()
+	}
 	ext := extByMIME(mimeType)
 	publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
 
