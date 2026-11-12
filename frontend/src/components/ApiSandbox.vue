@@ -28,8 +28,8 @@ const sbListProject = ref('')
 const sbListUsage = ref('')
 const sbListSearch = ref('')
 const sbMediaId = ref('')
-const sbProject = ref('test-project')
-const sbUsage = ref('cover')
+const sbProject = ref('')
+const sbUsage = ref('')
 const sbToken = ref('')
 const sbWorkerUrl = ref('')
 const sbWorkerToken = ref('')
@@ -394,8 +394,12 @@ const generatedCurl = computed(() => {
         fileName = fileName + '.webp'
       }
     }
-    multipartParts.push({ key: 'project', value: sbProject.value.trim() })
-    multipartParts.push({ key: 'usage', value: sbUsage.value.trim() })
+    if (sbProject.value.trim()) {
+      multipartParts.push({ key: 'project', value: sbProject.value.trim() })
+    }
+    if (sbUsage.value.trim()) {
+      multipartParts.push({ key: 'usage', value: sbUsage.value.trim() })
+    }
     multipartParts.push({ key: 'file', value: `@${fileName}`, isFile: true })
   } else if (selectedApi.value === 's3_buckets') {
     path = '/s3'
@@ -550,8 +554,8 @@ async function runSandboxApi() {
 
       fetchUrl = '/api/v1/media/upload'
       const form = new FormData()
-      form.append('project', project)
-      form.append('usage', usage)
+      if (project) form.append('project', project)
+      if (usage) form.append('usage', usage)
       form.append('file', fileToUpload)
 
       options = {
@@ -748,15 +752,15 @@ async function runS3Test(target: 'buckets' | 'objects') {
           <!-- POST /media/upload parameters -->
           <div v-else-if="selectedApi === 'upload'">
             <div class="form-field">
-              <label>所属项目 (project)</label>
+              <label>所属项目 (project: 选填)</label>
               <div class="input-wrapper">
-                <input v-model="sbProject" type="text" placeholder="例如 sheep 或 my-project" />
+                <input v-model="sbProject" type="text" placeholder="选填，留空默认归入 default" />
               </div>
             </div>
             <div class="form-field">
-              <label>使用用途 (usage: cover/scene/avatar/audio/file)</label>
+              <label>使用用途 (usage: 选填，支持 cover/scene/avatar/audio/file)</label>
               <div class="input-wrapper">
-                <input v-model="sbUsage" type="text" placeholder="例如 cover / avatar / scene" />
+                <input v-model="sbUsage" type="text" placeholder="选填，留空将根据 MIME 类型自动推导" />
               </div>
             </div>
             <div class="form-field">
