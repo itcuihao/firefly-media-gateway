@@ -387,32 +387,32 @@ onUnmounted(() => {
             <div class="share-field">
               <label>直链地址 (Raw Link)</label>
               <div class="copy-box">
-                <input type="text" readonly :value="rawUrl" />
-                <button class="m3-btn m3-btn-primary m3-btn-sm" @click="copyText(rawUrl, '直链')">复制</button>
+                <input type="text" readonly :value="rawUrl" @click="($event.target as HTMLInputElement).select()" />
+                <button class="m3-btn m3-btn-primary copy-action-btn" @click="copyText(rawUrl, '直链')">复制</button>
               </div>
             </div>
 
             <div class="share-field">
               <label>Markdown 代码</label>
               <div class="copy-box">
-                <input type="text" readonly :value="markdownCode" />
-                <button class="m3-btn m3-btn-primary m3-btn-sm" @click="copyText(markdownCode, 'Markdown')">复制</button>
+                <input type="text" readonly :value="markdownCode" @click="($event.target as HTMLInputElement).select()" />
+                <button class="m3-btn m3-btn-primary copy-action-btn" @click="copyText(markdownCode, 'Markdown')">复制</button>
               </div>
             </div>
 
             <div class="share-field">
               <label>HTML 代码</label>
               <div class="copy-box">
-                <input type="text" readonly :value="htmlCode" />
-                <button class="m3-btn m3-btn-primary m3-btn-sm" @click="copyText(htmlCode, 'HTML')">复制</button>
+                <input type="text" readonly :value="htmlCode" @click="($event.target as HTMLInputElement).select()" />
+                <button class="m3-btn m3-btn-primary copy-action-btn" @click="copyText(htmlCode, 'HTML')">复制</button>
               </div>
             </div>
 
             <div class="share-field">
               <label>BBCode 论坛代码</label>
               <div class="copy-box">
-                <input type="text" readonly :value="bbCode" />
-                <button class="m3-btn m3-btn-primary m3-btn-sm" @click="copyText(bbCode, 'BBCode')">复制</button>
+                <input type="text" readonly :value="bbCode" @click="($event.target as HTMLInputElement).select()" />
+                <button class="m3-btn m3-btn-primary copy-action-btn" @click="copyText(bbCode, 'BBCode')">复制</button>
               </div>
             </div>
           </div>
@@ -901,19 +901,19 @@ onUnmounted(() => {
 
 /* Share Dialog specifics */
 .share-dialog {
-  max-width: 600px;
+  max-width: 580px;
   width: 90%;
 }
 
 .share-dialog-body {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .share-preview {
   width: 100%;
-  max-height: 240px;
+  max-height: 220px;
   background: #000;
   border-radius: 12px;
   overflow: hidden;
@@ -924,7 +924,7 @@ onUnmounted(() => {
 
 .share-preview img, .share-preview video {
   max-width: 100%;
-  max-height: 240px;
+  max-height: 220px;
   object-fit: contain;
 }
 
@@ -946,28 +946,49 @@ onUnmounted(() => {
   font-weight: 600;
   color: hsl(var(--md-sys-color-primary));
   text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .copy-box {
   display: flex;
+  align-items: center;
   gap: 8px;
+  width: 100%;
 }
 
 .copy-box input {
-  flex: 1;
+  flex: 1 1 0%;
+  min-width: 0;
+  width: 0;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   color: #fff;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: 12px !important;
   outline: none;
   font-family: 'JetBrains Mono', monospace;
+  box-sizing: border-box;
+  text-overflow: ellipsis;
+}
+
+.copy-action-btn {
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  min-height: 36px !important;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .share-metadata-table {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-  padding-top: 16px;
+  padding-top: 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -986,5 +1007,30 @@ onUnmounted(() => {
 .meta-value {
   color: #fff;
   font-weight: 500;
+}
+
+@media (max-width: 640px) {
+  .share-dialog {
+    width: 100%;
+  }
+
+  .share-preview {
+    max-height: 150px;
+  }
+
+  .share-preview img, .share-preview video {
+    max-height: 150px;
+  }
+
+  .share-dialog-body {
+    gap: 14px;
+  }
+
+  .copy-action-btn {
+    min-height: 34px !important;
+    height: 34px;
+    padding: 0 12px;
+    font-size: 12px;
+  }
 }
 </style>
