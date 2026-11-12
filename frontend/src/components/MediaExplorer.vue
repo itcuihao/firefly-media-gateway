@@ -84,7 +84,7 @@ function onImageLoad(mediaId: string) {
 
 // Upload Modal state
 const uploadDialogOpen = ref(false)
-const uploadProject = ref('sheep')
+const uploadProject = ref('')
 const uploadUsage = ref('cover')
 const uploadAutoWebp = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -144,6 +144,7 @@ function detectFileKind(file: File) {
   const ext = dotIdx !== -1 ? file.name.substring(dotIdx).toLowerCase() : ''
   if (file.type.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.avif', '.heic', '.ico'].includes(ext)) {
     selectedFileKind.value = 'image'
+    uploadUsage.value = 'cover'
   } else if (file.type.startsWith('video/') || ['.mp4', '.webm', '.mov', '.mkv'].includes(ext)) {
     selectedFileKind.value = 'video'
     uploadUsage.value = 'scene'
@@ -299,6 +300,11 @@ function closeDetailSheet() {
 }
 
 function openUploadDialog() {
+  if (selectedProject.value && selectedProject.value !== '') {
+    uploadProject.value = selectedProject.value
+  } else if (!uploadProject.value) {
+    uploadProject.value = 'default'
+  }
   uploadDialogOpen.value = true
 }
 
@@ -781,7 +787,7 @@ onMounted(() => {
             <div class="form-field">
               <label>所属项目 (Project)</label>
               <div class="input-wrapper" style="position: relative;">
-                <input v-model="uploadProject" type="text" list="explorer-upload-projects" placeholder="输入或选择所属项目，如 sheep" :disabled="uploading" />
+                <input v-model="uploadProject" type="text" list="explorer-upload-projects" placeholder="输入或选择所属项目（留空默认归入 default）" :disabled="uploading" />
                 <datalist id="explorer-upload-projects">
                   <option v-for="p in projectsList" :key="p" :value="p" />
                 </datalist>
@@ -912,10 +918,10 @@ onMounted(() => {
           </div>
         </div>
       </div>
-      <div style="margin-top: 24px; display: flex; gap: 12px;" v-if="activeAsset">
-        <button class="m3-btn m3-btn-primary m3-btn-sm" style="flex: 1;" @click="openMediaAsset(activeAsset.publicUrl)">在新标签页打开</button>
-        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1;" @click="downloadMediaAsset(activeAsset)">下载</button>
-        <button class="m3-btn m3-btn-secondary m3-btn-sm" style="flex: 1;" @click="copyText(activeAsset.publicUrl)">复制链接</button>
+      <div class="m3-sheet-footer" v-if="activeAsset">
+        <button class="m3-btn m3-btn-primary m3-btn-sm" @click="openMediaAsset(activeAsset.publicUrl)">新窗口打开</button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="downloadMediaAsset(activeAsset)">立即下载</button>
+        <button class="m3-btn m3-btn-secondary m3-btn-sm" @click="copyText(activeAsset.publicUrl)">复制链接</button>
       </div>
     </div>
   </div>

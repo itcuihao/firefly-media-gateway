@@ -506,4 +506,65 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 			t.Fatalf("expected instant deduplication (duplicated=true), got %+v", dedupResp)
 		}
 	})
+
+	// ==========================================
+	// Test Case 6: Upload without explicit project/usage (auto-defaults)
+	// ==========================================
+	t.Run("Upload without explicit project and usage defaults cleanly", func(t *testing.T) {
+		// 1. Single multipart upload with ONLY file part
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		part, err := mw.CreateFormFile("file", "test-image.png")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		// Write a valid 2x2 PNG (greater than minImageSizeBytes)
+		samplePNG := []byte{
+			0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+			0x49, 0x48, 0x44, 0x47, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+			0x08, 0x02, 0x00, 0x00, 0x00, 0xFD, 0xD4, 0x9A, 0x73, 0x00, 0x00, 0x00,
+			0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xC0,
+			0xC0, 0xC4, 0xC0, 0xC0, 0xC0, 0x84, 0x03, 0x00, 0x03, 0x85, 0x01, 0x21,
+			0x98, 0x5C, 0xDF, 0xF7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+			0xAE, 0x42, 0x60, 0x82,
+		}
+		// Pad to > 100 bytes
+		for len(samplePNG) < 150 {
+			samplePNG = append(samplePNG, 0x00)
+		}
+		_, _ = part.Write(samplePNG)
+		_ = mw.Close()
+
+		req := httptest.NewRequest("POST", "/api/v1/media/upload", &buf)
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created for minimal upload without project/usage, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var asset media.Asset
+		if err := json.Unmarshal(rr.Body.Bytes(), &asset); err != nil {
+			t.Fatalf("unmarshal asset response: %v", err)
+		}
+		if asset.Project != "default" {
+			t.Errorf("expected project 'default', got %q", asset.Project)
+		}
+		if asset.Usage != "cover" {
+			t.Errorf("expected auto-deduced usage 'cover' for image, got %q", asset.Usage)
+		}
+
+		// 2. Chunked upload init without project and usage
+		initPayload := `{"fileName":"podcast.mp3","mimeType":"audio/mpeg","sizeBytes":1048576}`
+		initReq := httptest.NewRequest("POST", "/api/v1/media/upload/init", strings.NewReader(initPayload))
+		initReq.Header.Set("Authorization", "Bearer test-token")
+		initReq.Header.Set("Content-Type", "application/json")
+		initRR := httptest.NewRecorder()
+		handler.ServeHTTP(initRR, initReq)
+
+		if initRR.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from upload/init without project/usage, got %d: %s", initRR.Code, initRR.Body.String())
+		}
+	})
 }

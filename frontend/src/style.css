@@ -1446,6 +1446,29 @@ h2.section-title {
   gap: 20px;
 }
 
+.m3-sheet-footer {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.m3-sheet-footer .m3-btn {
+  flex: 1 1 calc(33.333% - 8px);
+  min-width: 0;
+  white-space: nowrap;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 480px) {
+  .m3-sheet-footer .m3-btn {
+    flex: 1 1 calc(50% - 8px);
+    min-height: 40px;
+  }
+}
+
 /* Toast system */
 .toast-container {
   position: fixed;

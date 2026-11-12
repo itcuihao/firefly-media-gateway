@@ -313,7 +313,7 @@ onUnmounted(() => {
           <!-- Video -->
           <template v-else-if="asset.mimeType.startsWith('video/')">
             <video v-if="hoveredVideoIds[asset.mediaId]" :src="asset.publicUrl" preload="metadata" muted playsinline></video>
-            <div v-else class="thumb-fallback">
+            <div v-else class="thumb-fallback" @click.stop="markVideoHovered(asset.mediaId)">
               <span class="material-symbols-rounded fallback-icon" style="font-size: 48px; color: hsl(var(--md-sys-color-primary));">play_circle</span>
               <span class="fallback-text">点击播放 / 悬停预览</span>
             </div>

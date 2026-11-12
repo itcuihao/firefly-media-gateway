@@ -132,14 +132,25 @@ func (s *Service) SetUploadConcurrency(c int) {
 	}
 }
 
+func defaultUsageByMediaKind(kind string) string {
+	switch kind {
+	case "image":
+		return "cover"
+	case "video":
+		return "scene"
+	case "audio":
+		return "audio"
+	default:
+		return "file"
+	}
+}
+
 func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) {
-	if strings.TrimSpace(req.Project) == "" {
-		return Asset{}, fmt.Errorf("project is required")
+	req.Project = strings.TrimSpace(req.Project)
+	if req.Project == "" {
+		req.Project = "default"
 	}
-	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
-	if !validUsages[req.Usage] {
-		return Asset{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
-	}
+	req.Usage = strings.TrimSpace(req.Usage)
 	if strings.TrimSpace(req.FileName) == "" {
 		return Asset{}, fmt.Errorf("file name is required")
 	}
@@ -164,6 +175,14 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 	mimeType, mediaKind, err := normalizeAndValidateMIME(req.FileName, req.DeclaredContentType, sniff)
 	if err != nil {
 		return Asset{}, err
+	}
+
+	if req.Usage == "" {
+		req.Usage = defaultUsageByMediaKind(mediaKind)
+	}
+	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
+	if !validUsages[req.Usage] {
+		return Asset{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
 	}
 
 	// Validate size limits and image sanity
@@ -766,10 +785,25 @@ func (s *Service) cleanupExpiredSessionsLocked() {
 func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (InitUploadOutput, error) {
 	project := strings.TrimSpace(in.Project)
 	if project == "" {
-		return InitUploadOutput{}, fmt.Errorf("project is required")
+		project = "default"
+	}
+	usage := strings.TrimSpace(in.Usage)
+	if usage == "" {
+		mime, kind, _ := normalizeAndValidateMIME(in.FileName, in.DeclaredMIMEType, nil)
+		if kind != "" {
+			usage = defaultUsageByMediaKind(kind)
+		} else if strings.HasPrefix(mime, "video/") {
+			usage = "scene"
+		} else if strings.HasPrefix(mime, "audio/") {
+			usage = "audio"
+		} else if strings.HasPrefix(mime, "image/") {
+			usage = "cover"
+		} else {
+			usage = "file"
+		}
 	}
 	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
-	if !validUsages[in.Usage] {
+	if !validUsages[usage] {
 		return InitUploadOutput{}, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
 	}
 	fileName := strings.TrimSpace(in.FileName)
@@ -800,7 +834,7 @@ func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (In
 				SizeBytes:            existingAsset.SizeBytes,
 				SHA256:               &shaHex,
 				Project:              project,
-				Usage:                in.Usage,
+				Usage:                usage,
 				IsChunked:            existingAsset.IsChunked,
 			})
 			if err != nil {
@@ -844,7 +878,7 @@ func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (In
 	sess := &uploadSession{
 		id:           uploadID,
 		project:      project,
-		usage:        in.Usage,
+		usage:        usage,
 		fileName:     fileName,
 		declaredMIME: in.DeclaredMIMEType,
 		sizeBytes:    in.SizeBytes,
@@ -1002,6 +1036,11 @@ func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, ov
 	}
 	shaHex := hex.EncodeToString(h.Sum(nil))
 
+	usage := sess.usage
+	if usage == "" {
+		usage = defaultUsageByMediaKind(mediaKind)
+	}
+
 	if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
 		assetID := newUUID()
 		ext := extByMIME(mimeType)
@@ -1016,7 +1055,7 @@ func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, ov
 			SizeBytes:            sizeBytes,
 			SHA256:               &shaHex,
 			Project:              sess.project,
-			Usage:                sess.usage,
+			Usage:                usage,
 			IsChunked:            existingAsset.IsChunked,
 		})
 		if err != nil {
@@ -1057,7 +1096,7 @@ func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, ov
 
 	upReq := UploadRequest{
 		Project:             sess.project,
-		Usage:               sess.usage,
+		Usage:               usage,
 		FileName:            sess.fileName,
 		DeclaredContentType: sess.declaredMIME,
 		OverrideProvider:    overrideProvider,
