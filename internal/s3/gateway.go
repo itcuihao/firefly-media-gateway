@@ -177,8 +177,10 @@ func parsePutKey(key string) (project, usage, filename string) {
 		switch ext {
 		case ".mp3", ".ogg", ".wav", ".aac", ".flac", ".m4a":
 			return "audio"
-		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif", ".ico":
+		case ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v":
 			return "scene"
+		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif", ".heic", ".ico":
+			return "cover"
 		default:
 			return "file"
 		}

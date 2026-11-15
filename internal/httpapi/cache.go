@@ -123,7 +123,9 @@ func (d *DiskCache) GetOrFetchChunk(ctx context.Context, chunkKey string, expect
 			return "", fmt.Errorf("upstream returned status %d", resp.StatusCode)
 		}
 
-		written, err := io.Copy(tmpFile, resp.Body)
+		bufPtr := streamCopyBufPool.Get().(*[]byte)
+		written, err := io.CopyBuffer(tmpFile, resp.Body, *bufPtr)
+		streamCopyBufPool.Put(bufPtr)
 		if err != nil {
 			return "", fmt.Errorf("write chunk temp file: %w", err)
 		}
@@ -145,6 +147,18 @@ func (d *DiskCache) GetOrFetchChunk(ctx context.Context, chunkKey string, expect
 		return "", err
 	}
 	return res.(string), nil
+}
+
+// HasFile checks if a complete cached file exists on disk without triggering a network fetch.
+func (d *DiskCache) HasFile(fileKey string, expectedSize int64) (string, bool) {
+	targetPath := filepath.Join(d.dir, "files", fileKey)
+	if fi, err := os.Stat(targetPath); err == nil {
+		if expectedSize <= 0 || fi.Size() == expectedSize {
+			_ = os.Chtimes(targetPath, time.Now(), time.Now())
+			return targetPath, true
+		}
+	}
+	return "", false
 }
 
 // GetOrFetchFile returns the absolute path of a cached single media file.
@@ -205,7 +219,9 @@ func (d *DiskCache) GetOrFetchFile(ctx context.Context, fileKey string, expected
 			return "", fmt.Errorf("upstream returned status %d", resp.StatusCode)
 		}
 
-		written, err := io.Copy(tmpFile, resp.Body)
+		bufPtr := streamCopyBufPool.Get().(*[]byte)
+		written, err := io.CopyBuffer(tmpFile, resp.Body, *bufPtr)
+		streamCopyBufPool.Put(bufPtr)
 		if err != nil {
 			return "", fmt.Errorf("write media temp file: %w", err)
 		}

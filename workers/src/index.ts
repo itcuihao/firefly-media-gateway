@@ -19,6 +19,7 @@ interface Env {
   AUTH_TOKEN?: string;             // 可选：Bearer token 鉴权
   MAX_UPLOAD_SIZE?: string;        // 可选：最大上传大小（字节）
   PRIVATE_RULES?: string;          // 可选：私有规则列表（英文逗号分隔，支持 "*"、"all" 或特定 project/usage）
+  FILE_PATHS?: KVNamespace;        // 可选：KV Namespace，用于跨 Isolate 共享 Telegram file_path 缓存
 }
 
 // Bot 配置
@@ -373,7 +374,7 @@ async function handleUpload(request: Request, env: Env): Promise<Response> {
         const fileData = await fileResponse.json() as any;
         if (fileData.ok && fileData.result.file_path) {
           response.file_url = `https://api.telegram.org/file/bot${botConfig.token}/${fileData.result.file_path}`;
-          FILE_PATH_CACHE.set(doc.file_id, {
+          setFilePathCache(doc.file_id, {
             botName,
             botToken: botConfig.token,
             filePath: fileData.result.file_path,
@@ -474,22 +475,107 @@ async function handleDeleteFile(request: Request, env: Env): Promise<Response> {
   }
 }
 
+const FILE_PATH_CACHE_MAX = 5000;
+
+function getFilePathCache(fileId: string, headerBotName: string | null, now: number): CachedTelegramFile | undefined {
+  const hit = FILE_PATH_CACHE.get(fileId);
+  if (!hit) return undefined;
+  if (now >= hit.expiresAt) {
+    FILE_PATH_CACHE.delete(fileId);
+    return undefined;
+  }
+  if (headerBotName && hit.botName !== headerBotName) return undefined;
+  // Refresh LRU recency by moving entry to the end of Map
+  FILE_PATH_CACHE.delete(fileId);
+  FILE_PATH_CACHE.set(fileId, hit);
+  return hit;
+}
+
+function setFilePathCache(fileId: string, entry: CachedTelegramFile): void {
+  if (FILE_PATH_CACHE.has(fileId)) {
+    FILE_PATH_CACHE.delete(fileId);
+  } else if (FILE_PATH_CACHE.size >= FILE_PATH_CACHE_MAX) {
+    const oldestKey = FILE_PATH_CACHE.keys().next().value;
+    if (oldestKey !== undefined) {
+      FILE_PATH_CACHE.delete(oldestKey);
+    }
+  }
+  FILE_PATH_CACHE.set(fileId, entry);
+}
+
 /**
- * 解析并缓存 Telegram 文件路径（消除重复 getFile 请求）
+ * 构造剥离签发参数后的规范化边缘缓存 Key（避免 token_sig / expires 导致缓存碎片化）
+ */
+function buildCleanCacheKey(requestUrl: string): Request {
+  const cacheUrl = new URL(requestUrl);
+  cacheUrl.searchParams.delete('token_sig');
+  cacheUrl.searchParams.delete('expires');
+  return new Request(cacheUrl.toString(), { method: 'GET' });
+}
+
+/**
+ * 解析并缓存 Telegram 文件路径（内存 + 可选 KV 跨 Isolate 共享，消除重复 getFile 请求）
  */
 async function resolveTelegramFile(
   fileId: string,
   headerBotName: string | null,
   botConfigs: Map<string, BotConfig>,
-  forceRefresh = false
+  forceRefresh = false,
+  env?: Env,
+  ctx?: ExecutionContext
 ): Promise<{ cached?: CachedTelegramFile; errorResp?: Response }> {
   const now = Date.now();
   if (!forceRefresh) {
-    const hit = FILE_PATH_CACHE.get(fileId);
-    if (hit && now < hit.expiresAt && (!headerBotName || hit.botName === headerBotName)) {
+    const hit = getFilePathCache(fileId, headerBotName, now);
+    if (hit) {
       return { cached: hit };
     }
+    if (env?.FILE_PATHS) {
+      try {
+        const kvVal = await env.FILE_PATHS.get<{
+          botName: string;
+          filePath: string;
+          mimeType: string;
+          fileSize: number;
+        }>(`fp:${fileId}`, 'json');
+        if (kvVal && kvVal.filePath && (!headerBotName || kvVal.botName === headerBotName)) {
+          const botCfg = getBotConfig(botConfigs, kvVal.botName);
+          if (botCfg) {
+            const entry: CachedTelegramFile = {
+              botName: kvVal.botName,
+              botToken: botCfg.token,
+              filePath: kvVal.filePath,
+              mimeType: kvVal.mimeType || 'application/octet-stream',
+              fileSize: kvVal.fileSize || 0,
+              expiresAt: now + FILE_CACHE_TTL_MS,
+            };
+            setFilePathCache(fileId, entry);
+            return { cached: entry };
+          }
+        }
+      } catch (e) {
+        console.warn('KV read error:', e);
+      }
+    }
   }
+
+  const persistCacheEntry = (entry: CachedTelegramFile) => {
+    setFilePathCache(fileId, entry);
+    if (env?.FILE_PATHS) {
+      const kvPayload = JSON.stringify({
+        botName: entry.botName,
+        filePath: entry.filePath,
+        mimeType: entry.mimeType,
+        fileSize: entry.fileSize,
+      });
+      const putPromise = env.FILE_PATHS.put(`fp:${fileId}`, kvPayload, {
+        expirationTtl: Math.floor(FILE_CACHE_TTL_MS / 1000),
+      }).catch((err: unknown) => console.warn('KV put error:', err));
+      if (ctx && ctx.waitUntil) {
+        ctx.waitUntil(putPromise);
+      }
+    }
+  };
 
   if (headerBotName) {
     const botConfig = getBotConfig(botConfigs, headerBotName);
@@ -515,8 +601,7 @@ async function resolveTelegramFile(
       fileSize: data.result.file_size || 0,
       expiresAt: now + FILE_CACHE_TTL_MS,
     };
-    if (FILE_PATH_CACHE.size > 5000) FILE_PATH_CACHE.clear();
-    FILE_PATH_CACHE.set(fileId, entry);
+    persistCacheEntry(entry);
     return { cached: entry };
   }
 
@@ -542,8 +627,7 @@ async function resolveTelegramFile(
           fileSize: data.result.file_size || 0,
           expiresAt: now + FILE_CACHE_TTL_MS,
         };
-        if (FILE_PATH_CACHE.size > 5000) FILE_PATH_CACHE.clear();
-        FILE_PATH_CACHE.set(fileId, entry);
+        persistCacheEntry(entry);
         return { cached: entry };
       }
     } catch {
@@ -612,7 +696,7 @@ async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext)
 
   // 边缘缓存检查 (仅对非 private 且非 debug 请求启用)
   const cache = typeof caches !== 'undefined' ? ((caches as any).default as Cache | undefined) : null;
-  const cacheKey = new Request(url.toString(), { method: 'GET' });
+  const cacheKey = buildCleanCacheKey(request.url);
   if (cache && !isPrivate && !debugMode) {
     try {
       const cached = await cache.match(cacheKey);
@@ -636,7 +720,7 @@ async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext)
 
   try {
     const headerBotName = request.headers.get('X-Bot-Name');
-    const resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs);
+    const resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, false, env, ctx);
     if (resolved.errorResp || !resolved.cached) {
       return resolved.errorResp!;
     }
@@ -658,7 +742,7 @@ async function handleGetFile(request: Request, env: Env, ctx?: ExecutionContext)
 
     const extraHeaders: Record<string, string> = {};
     if (!isPrivate && !debugMode) {
-      extraHeaders['Cache-Control'] = 'public, max-age=86400';
+      extraHeaders['Cache-Control'] = 'public, max-age=31536000, immutable';
       extraHeaders['X-Cache-Status'] = 'MISS';
     } else {
       extraHeaders['Cache-Control'] = 'private, no-cache';
@@ -734,17 +818,41 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
     }
   }
 
-  // 边缘缓存检查 (仅对非 private 且非 Range 请求启用)
+  // 边缘缓存检查 (对非 private GET 请求启用；Range 请求命中完整缓存时本地切片返回 206，0 回源 Telegram)
   const rangeHeader = request.headers.get('Range');
   const cache = typeof caches !== 'undefined' ? ((caches as any).default as Cache | undefined) : null;
-  const cacheKey = new Request(url.toString(), { method: 'GET' });
+  const cacheKey = buildCleanCacheKey(request.url);
 
-  if (cache && !isPrivate && !rangeHeader && request.method === 'GET') {
+  if (cache && !isPrivate && request.method === 'GET') {
     try {
       const cached = await cache.match(cacheKey);
       if (cached) {
         const hitHeaders = new Headers(cached.headers);
         hitHeaders.set('X-Cache-Status', 'HIT');
+
+        if (rangeHeader && cached.body) {
+          const cachedLen = parseInt(cached.headers.get('Content-Length') || '0', 10);
+          if (cachedLen > 0) {
+            const parsed = parseRange(rangeHeader, cachedLen);
+            if (!parsed) {
+              return new Response(null, {
+                status: 416,
+                headers: {
+                  'Content-Range': `bytes */${cachedLen}`,
+                  'Accept-Ranges': 'bytes',
+                  'Access-Control-Allow-Origin': '*',
+                },
+              });
+            }
+            hitHeaders.set('Content-Range', `bytes ${parsed.start}-${parsed.end}/${cachedLen}`);
+            hitHeaders.set('Content-Length', String(parsed.end - parsed.start + 1));
+            return new Response(sliceStream(cached.body, parsed.start, parsed.end), {
+              status: 206,
+              headers: hitHeaders,
+            });
+          }
+        }
+
         return new Response(cached.body, {
           status: cached.status,
           headers: hitHeaders,
@@ -762,7 +870,7 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
 
   try {
     const headerBotName = request.headers.get('X-Bot-Name');
-    let resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, false);
+    let resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, false, env, ctx);
     if (resolved.errorResp || !resolved.cached) {
       return resolved.errorResp!;
     }
@@ -820,7 +928,7 @@ async function handleStreamFile(request: Request, env: Env, ctx?: ExecutionConte
 
     // 若缓存的 file_path 提前失效，强制刷新一次重试
     if (fileResp.status === 404 || fileResp.status === 403) {
-      resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, true);
+      resolved = await resolveTelegramFile(fileId, headerBotName, botConfigs, true, env, ctx);
       if (resolved.errorResp || !resolved.cached) {
         return resolved.errorResp!;
       }
@@ -933,6 +1041,9 @@ function error(message: string, code: string, status = 400): Response {
  * 校验签名
  */
 async function verifySignature(fileId: string, expires: number, sig: string, authToken: string): Promise<boolean> {
+  if (!/^[0-9a-fA-F]{64}$/.test(sig)) {
+    return false;
+  }
   try {
     const encoder = new TextEncoder();
     const keyData = encoder.encode(authToken);
@@ -946,8 +1057,10 @@ async function verifySignature(fileId: string, expires: number, sig: string, aut
       ['verify']
     );
 
-    // Convert hex sig to Uint8Array
-    const sigBytes = new Uint8Array(sig.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+    const sigBytes = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      sigBytes[i] = parseInt(sig.slice(i * 2, i * 2 + 2), 16);
+    }
 
     return await crypto.subtle.verify(
       'HMAC',
@@ -1081,7 +1194,7 @@ function sliceStream(body: ReadableStream<Uint8Array>, start: number, end: numbe
         }
         if (chunkStart > end) {
           controller.close();
-          reader.cancel();
+          reader.cancel().catch(() => {});
           return;
         }
 
@@ -1092,13 +1205,13 @@ function sliceStream(body: ReadableStream<Uint8Array>, start: number, end: numbe
         emitted += sub.length;
         if (emitted >= needed) {
           controller.close();
-          reader.cancel();
+          reader.cancel().catch(() => {});
           return;
         }
       }
     },
     cancel() {
-      reader.cancel();
+      reader.cancel().catch(() => {});
     },
   });
 }

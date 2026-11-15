@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, inject, computed, onMounted, watch } from 'vue'
-import { getApiBaseUrl, copyToClipboard, apiRequest } from '../api'
+import { getApiBaseUrl, copyToClipboard, apiRequest, uploadMediaWithProgress } from '../api'
 import FireflySelect from './FireflySelect.vue'
 
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
@@ -552,17 +552,33 @@ async function runSandboxApi() {
         }
       }
 
-      fetchUrl = '/api/v1/media/upload'
-      const form = new FormData()
-      if (project) form.append('project', project)
-      if (usage) form.append('usage', usage)
-      form.append('file', fileToUpload)
-
-      options = {
-        method: 'POST',
-        headers, // Browser sets multipart boundary automatically
-        body: form
+      statusPillVisible.value = true
+      statusPillStyle.value = {
+        background: 'rgba(0, 229, 255, 0.12)',
+        color: '#00e5ff'
       }
+      statusPillText.value = '准备上传...'
+
+      const asset = await uploadMediaWithProgress({
+        file: fileToUpload,
+        project,
+        usage,
+        onProgress: (info) => {
+          const speedMB = info.speedBps > 0 ? ` • ${(info.speedBps / (1024 * 1024)).toFixed(1)} MB/s` : ''
+          statusPillText.value = `${info.percent}%${speedMB}`
+          responseBody.value = `// ${info.stage} (${info.percent}%)`
+        }
+      })
+
+      const duration = (performance.now() - startTime).toFixed(0)
+      statusPillText.value = `HTTP 201 • ${duration}ms`
+      statusPillStyle.value = {
+        background: 'rgba(0, 229, 255, 0.15)',
+        color: '#00e5ff'
+      }
+      responseBody.value = JSON.stringify(asset, null, 2)
+      showToast('API 请求执行成功！')
+      return
     } else if (selectedApi.value === 's3_buckets') {
       fetchUrl = '/s3'
       options = { method: 'GET', headers }

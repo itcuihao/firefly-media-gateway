@@ -278,7 +278,48 @@ export async function uploadMediaWithProgress(options: {
     totalChunks?: number
   }
 
-  // Try chunked session API (supports instant 0-byte deduplication & resumable chunk retries)
+  // Small files (<= 5MB): single multipart upload with X-Content-SHA256 header skips 3-step handshake
+  if (totalBytes <= 5 * 1024 * 1024) {
+    const form = new FormData()
+    if (project) form.append('project', project)
+    if (usage) form.append('usage', usage)
+    form.append('file', file)
+
+    const headers: Record<string, string> = { ...getAuthAndWorkerHeaders() }
+    if (sha256) {
+      headers['X-Content-SHA256'] = sha256
+    }
+
+    const asset = await sendXhrWithProgress<MediaAsset>({
+      url: buildApiUrl('/api/v1/media/upload'),
+      method: 'POST',
+      headers,
+      body: form,
+      signal,
+      onUploadProgress: (loaded, total) => {
+        const actualTotal = total || totalBytes
+        const percent = actualTotal > 0 ? Math.min(96, Math.floor((loaded / actualTotal) * 96)) : 50
+        onProgress?.({
+          percent,
+          loadedBytes: loaded,
+          totalBytes: actualTotal,
+          speedBps: calcSpeed(loaded),
+          stage: loaded >= actualTotal ? '正在同步至存储节点...' : '正在上传文件数据...',
+        })
+      },
+    })
+
+    onProgress?.({
+      percent: 100,
+      loadedBytes: totalBytes,
+      totalBytes,
+      speedBps: calcSpeed(totalBytes),
+      stage: '上传完成！',
+    })
+    return asset
+  }
+
+  // Try chunked session API (> 5MB: supports 0-byte deduplication & resumable chunk retries)
   let initData: InitUploadResponse | null = null
   try {
     initData = await apiRequest<InitUploadResponse>('/api/v1/media/upload/init', {
@@ -416,14 +457,19 @@ export async function uploadMediaWithProgress(options: {
 
   // Fallback to single multipart upload with project & usage placed before file for streaming fast-path
   const form = new FormData()
-  form.append('project', project)
-  form.append('usage', usage)
+  if (project) form.append('project', project)
+  if (usage) form.append('usage', usage)
   form.append('file', file)
+
+  const fallbackHeaders: Record<string, string> = { ...getAuthAndWorkerHeaders() }
+  if (sha256) {
+    fallbackHeaders['X-Content-SHA256'] = sha256
+  }
 
   const asset = await sendXhrWithProgress<MediaAsset>({
     url: buildApiUrl('/api/v1/media/upload'),
     method: 'POST',
-    headers: getAuthAndWorkerHeaders(),
+    headers: fallbackHeaders,
     body: form,
     signal,
     onUploadProgress: (loaded, total) => {

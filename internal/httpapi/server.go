@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -166,6 +167,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	if project == "" {
+		project = strings.TrimSpace(r.Header.Get("X-Project"))
+	}
+	usage := strings.TrimSpace(r.URL.Query().Get("usage"))
+	if usage == "" {
+		usage = strings.TrimSpace(r.Header.Get("X-Usage"))
+	}
+
+	// Instant deduplication fast-path via X-Content-SHA256 header before reading multipart body
+	if shaHeader := strings.TrimSpace(r.Header.Get("X-Content-SHA256")); len(shaHeader) == 64 {
+		if asset, hit, err := s.svc.TryDedupBySHA256(r.Context(), shaHeader, project, usage); err != nil {
+			s.writeDomainError(w, r, err)
+			return
+		} else if hit {
+			writeJSON(w, http.StatusCreated, s.signAssetURL(asset))
+			return
+		}
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -174,17 +195,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		project             string
-		usage               string
 		isMember            bool
 		fileName            string
 		declaredContentType string
-		bufferedTmpFile     *os.File
+		prepared            *media.PreparedUpload
 	)
 	defer func() {
-		if bufferedTmpFile != nil {
-			_ = bufferedTmpFile.Close()
-			_ = os.Remove(bufferedTmpFile.Name())
+		if prepared != nil {
+			prepared.Cleanup()
 		}
 	}()
 
@@ -225,7 +243,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			declaredContentType = part.Header.Get("Content-Type")
 
 			// Fast path: if project & usage were already parsed before the file part,
-			// stream `part` directly into Service.Upload without an extra temporary file!
+			// stream `part` directly into Service.Upload without an extra temporary file.
 			if project != "" && usage != "" {
 				asset, upErr := s.svc.Upload(r.Context(), media.UploadRequest{
 					Project:             project,
@@ -249,24 +267,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Fallback when `file` field appears before `project`/`usage` in multipart form
-			tmp, tmpErr := os.CreateTemp("", "http-multipart-*")
-			if tmpErr != nil {
-				_ = part.Close()
-				s.writeError(w, r, http.StatusInternalServerError, "failed to create temp file", tmpErr)
-				return
-			}
-			bufferedTmpFile = tmp
-			bufPtr := streamCopyBufPool.Get().(*[]byte)
-			_, copyErr := io.CopyBuffer(tmp, part, *bufPtr)
-			streamCopyBufPool.Put(bufPtr)
+			// Single-pass prepare: buffer once with SHA-256 & header sniff so Service.Upload reuses the same temp file
+			var prepErr error
+			prepared, prepErr = media.PrepareUpload(part)
 			_ = part.Close()
-			if copyErr != nil {
-				if strings.Contains(strings.ToLower(copyErr.Error()), "request body too large") {
-					s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", copyErr)
+			if prepErr != nil {
+				if strings.Contains(strings.ToLower(prepErr.Error()), "request body too large") || prepErr == media.ErrFileTooLarge {
+					s.writeError(w, r, http.StatusRequestEntityTooLarge, "file too large", prepErr)
 					return
 				}
-				s.writeError(w, r, http.StatusBadRequest, "invalid multipart stream", copyErr)
+				s.writeError(w, r, http.StatusBadRequest, "invalid multipart stream", prepErr)
 				return
 			}
 		default:
@@ -274,11 +284,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if bufferedTmpFile == nil || fileName == "" {
+	if prepared == nil || fileName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "file is required", nil)
 		return
 	}
-	if _, err := bufferedTmpFile.Seek(0, io.SeekStart); err != nil {
+	if _, err := prepared.TmpFile.Seek(0, io.SeekStart); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "rewind temp file failed", err)
 		return
 	}
@@ -288,10 +298,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Usage:               usage,
 		FileName:            fileName,
 		DeclaredContentType: declaredContentType,
-		Reader:              bufferedTmpFile,
+		Prepared:            prepared,
 		IsMember:            isMember,
 		OverrideProvider:    overrideProvider,
 	})
+	prepared = nil // ownership transferred to Service.Upload
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return
@@ -465,9 +476,9 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		etag = fmt.Sprintf("%q", *asset.SHA256)
 	}
 
-	willServeWebP := disposition == "inline" && !streamInfo.IsChunked && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true" && clientAcceptsWebP(r)
-	if willServeWebP {
-		etag = fmt.Sprintf("%q", "webp-"+asset.ID)
+	compressibleImg := disposition == "inline" && !streamInfo.IsChunked && isCompressibleImage(asset.MIMEType) && r.URL.Query().Get("raw") != "true"
+	if compressibleImg {
+		w.Header().Add("Vary", "Accept")
 	}
 	w.Header().Set("ETag", etag)
 
@@ -531,6 +542,12 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 	}
 
 	cachePath := filepath.Join(cacheDir, mediaID+".webp")
+	skipPath := cachePath + ".skip"
+
+	// Skip WebP conversion if previous check determined the original file is smaller
+	if _, err := os.Stat(skipPath); err == nil {
+		return false
+	}
 
 	// If cache already exists, serve immediately
 	if _, err := os.Stat(cachePath); err == nil {
@@ -539,13 +556,17 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
 		w.Header().Set("Cache-Control", cacheControl)
+		w.Header().Set("ETag", fmt.Sprintf("%q", "webp-"+mediaID))
 		http.ServeFile(w, r, cachePath)
 		return true
 	}
 
 	// Use singleflight to coalesce concurrent cache misses for the same mediaID
-	_, sfErr, _ := s.sf.Do("webp:"+mediaID, func() (any, error) {
+	sfRes, sfErr, _ := s.sf.Do("webp:"+mediaID, func() (any, error) {
 		// Double-check inside singleflight lock
+		if _, err := os.Stat(skipPath); err == nil {
+			return "", nil
+		}
 		if _, err := os.Stat(cachePath); err == nil {
 			_ = os.Chtimes(cachePath, time.Now(), time.Now())
 			return cachePath, nil
@@ -573,9 +594,27 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 			return nil, fmt.Errorf("download status: %d", resp.StatusCode)
 		}
 
-		img, _, err := image.Decode(resp.Body)
+		origData, err := io.ReadAll(io.LimitReader(resp.Body, 25*1024*1024))
+		if err != nil {
+			return nil, fmt.Errorf("read original image: %w", err)
+		}
+
+		img, _, err := image.Decode(bytes.NewReader(origData))
 		if err != nil {
 			return nil, fmt.Errorf("decode image: %w", err)
+		}
+
+		var webpBuf bytes.Buffer
+		err = gowebp.Encode(&webpBuf, img, &gowebp.Options{Lossy: true, Quality: 80})
+		if err != nil {
+			return nil, fmt.Errorf("encode webp: %w", err)
+		}
+
+		// Do not serve bloated WebP if it is significantly larger than the original image (>20% and >4KB)
+		if webpBuf.Len() > len(origData)*12/10 && webpBuf.Len()-len(origData) > 4096 {
+			_ = os.WriteFile(skipPath, []byte("1"), 0644)
+			s.logger.Printf("[WEBP] skipped %q: webp (%d B) significantly larger than original (%d B)", mediaID, webpBuf.Len(), len(origData))
+			return "", nil
 		}
 
 		tmpFile, err := os.CreateTemp(cacheDir, "webp-tmp-*")
@@ -588,9 +627,8 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 			os.Remove(tmpName)
 		}()
 
-		err = gowebp.Encode(tmpFile, img, &gowebp.Options{Lossy: true, Quality: 80})
-		if err != nil {
-			return nil, fmt.Errorf("encode webp: %w", err)
+		if _, err := tmpFile.Write(webpBuf.Bytes()); err != nil {
+			return nil, fmt.Errorf("write webp temp file: %w", err)
 		}
 		tmpFile.Close()
 
@@ -603,7 +641,7 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 			s.diskCache.TriggerEviction()
 		}
 
-		s.logger.Printf("[WEBP] successfully created cache for %q", mediaID)
+		s.logger.Printf("[WEBP] successfully created cache for %q (%d B -> %d B)", mediaID, len(origData), webpBuf.Len())
 		return cachePath, nil
 	})
 
@@ -611,11 +649,15 @@ func (s *Server) tryServeWebPCache(w http.ResponseWriter, r *http.Request, media
 		s.logger.Printf("[WEBP] conversion failed for %q: %v", mediaID, sfErr)
 		return false
 	}
+	if sfPath, _ := sfRes.(string); sfPath == "" {
+		return false
+	}
 
 	if _, err := os.Stat(cachePath); err == nil {
 		w.Header().Set("Content-Type", "image/webp")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", mediaID+".webp"))
 		w.Header().Set("Cache-Control", cacheControl)
+		w.Header().Set("ETag", fmt.Sprintf("%q", "webp-"+mediaID))
 		http.ServeFile(w, r, cachePath)
 		return true
 	}
@@ -627,25 +669,40 @@ func (s *Server) proxySingleMedia(w http.ResponseWriter, r *http.Request, stream
 	// Attempt to serve from disk cache if file size is known and within reasonable bounds (<= 100MB)
 	if s.diskCache != nil && streamInfo.TotalBytes > 0 && streamInfo.TotalBytes <= 100*1024*1024 {
 		fileKey := fmt.Sprintf("%s.bin", mediaID)
-		filePath, err := s.diskCache.GetOrFetchFile(r.Context(), fileKey, streamInfo.TotalBytes, streamInfo.StreamURL, streamInfo.Headers)
-		if err == nil {
-			f, err := os.Open(filePath)
-			if err == nil {
-				defer f.Close()
-				if streamInfo.MIMEType != "" {
-					w.Header().Set("Content-Type", streamInfo.MIMEType)
+		filePath, cached := s.diskCache.HasFile(fileKey, streamInfo.TotalBytes)
+		isRange := strings.TrimSpace(r.Header.Get("Range")) != ""
+
+		// For cache miss on Range requests or large files (> 5MB), stream immediately for instant TTFB
+		// and warm the SSD disk cache asynchronously in the background.
+		if !cached && (isRange || streamInfo.TotalBytes > 5*1024*1024) {
+			go func(url string, hdrs map[string]string, size int64, key string) {
+				_, _ = s.diskCache.GetOrFetchFile(context.Background(), key, size, url, hdrs)
+			}(streamInfo.StreamURL, streamInfo.Headers, streamInfo.TotalBytes, fileKey)
+		} else {
+			if !cached {
+				var err error
+				filePath, err = s.diskCache.GetOrFetchFile(r.Context(), fileKey, streamInfo.TotalBytes, streamInfo.StreamURL, streamInfo.Headers)
+				cached = err == nil
+			}
+			if cached {
+				f, err := os.Open(filePath)
+				if err == nil {
+					defer f.Close()
+					if streamInfo.MIMEType != "" {
+						w.Header().Set("Content-Type", streamInfo.MIMEType)
+					}
+					if w.Header().Get("Accept-Ranges") == "" {
+						w.Header().Set("Accept-Ranges", "bytes")
+					}
+					w.Header().Set("Cache-Control", cacheControl)
+					fi, _ := f.Stat()
+					var modTime time.Time
+					if fi != nil {
+						modTime = fi.ModTime()
+					}
+					http.ServeContent(w, r, mediaID, modTime, f)
+					return
 				}
-				if w.Header().Get("Accept-Ranges") == "" {
-					w.Header().Set("Accept-Ranges", "bytes")
-				}
-				w.Header().Set("Cache-Control", cacheControl)
-				fi, _ := f.Stat()
-				var modTime time.Time
-				if fi != nil {
-					modTime = fi.ModTime()
-				}
-				http.ServeContent(w, r, mediaID, modTime, f)
-				return
 			}
 		}
 	}

@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -565,6 +567,25 @@ func TestVideoAutoChunkingAndStreamingIntegration(t *testing.T) {
 
 		if initRR.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK from upload/init without project/usage, got %d: %s", initRR.Code, initRR.Body.String())
+		}
+
+		// 3. Instant dedup via X-Content-SHA256 header on POST /api/v1/media/upload without body
+		sum := sha256.Sum256(samplePNG)
+		dedupReq := httptest.NewRequest("POST", "/api/v1/media/upload?project=fast-proj&usage=avatar", nil)
+		dedupReq.Header.Set("Authorization", "Bearer test-token")
+		dedupReq.Header.Set("X-Content-SHA256", hex.EncodeToString(sum[:]))
+		dedupRR := httptest.NewRecorder()
+		handler.ServeHTTP(dedupRR, dedupReq)
+
+		if dedupRR.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created for X-Content-SHA256 instant dedup, got %d: %s", dedupRR.Code, dedupRR.Body.String())
+		}
+		var dedupAsset media.Asset
+		if err := json.Unmarshal(dedupRR.Body.Bytes(), &dedupAsset); err != nil {
+			t.Fatalf("unmarshal dedup asset: %v", err)
+		}
+		if dedupAsset.Project != "fast-proj" || dedupAsset.Usage != "avatar" {
+			t.Errorf("expected project=fast-proj usage=avatar, got %q/%q", dedupAsset.Project, dedupAsset.Usage)
 		}
 	})
 }

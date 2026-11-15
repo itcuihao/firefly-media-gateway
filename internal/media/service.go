@@ -53,18 +53,47 @@ type cachedChunksEntry struct {
 }
 
 type uploadSession struct {
-	mu           sync.Mutex
-	id           string
-	project      string
-	usage        string
-	fileName     string
-	declaredMIME string
-	sizeBytes    int64
-	totalChunks  int
-	tmpFile      *os.File
-	sniff        []byte
-	received     map[int]bool
-	createdAt    time.Time
+	mu             sync.Mutex
+	id             string
+	project        string
+	usage          string
+	fileName       string
+	declaredMIME   string
+	sizeBytes      int64
+	totalChunks    int
+	tmpFile        *os.File
+	sniff          []byte
+	singleChunkSHA string
+	received       map[int]bool
+	createdAt      time.Time
+}
+
+type PreparedUpload struct {
+	TmpFile   *os.File
+	SizeBytes int64
+	SHA256    string
+	Sniff     []byte
+}
+
+func (p *PreparedUpload) Cleanup() {
+	if p != nil && p.TmpFile != nil {
+		_ = p.TmpFile.Close()
+		_ = os.Remove(p.TmpFile.Name())
+		p.TmpFile = nil
+	}
+}
+
+func PrepareUpload(src io.Reader) (*PreparedUpload, error) {
+	tmpFile, sizeBytes, shaHex, sniff, err := persistUpload(src)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedUpload{
+		TmpFile:   tmpFile,
+		SizeBytes: sizeBytes,
+		SHA256:    shaHex,
+		Sniff:     sniff,
+	}, nil
 }
 
 type InitUploadInput struct {
@@ -92,6 +121,7 @@ type UploadRequest struct {
 	FileName            string
 	DeclaredContentType string
 	Reader              io.Reader
+	Prepared            *PreparedUpload
 	IsMember            bool // Deprecated: preserved for backward compatibility; all uploads auto-chunk
 	OverrideProvider    provider.StorageProvider
 }
@@ -164,13 +194,28 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (Asset, error) 
 		}
 	}
 
-	// Read entire file to temp file
-	tmpFile, sizeBytes, shaHex, sniff, err := persistUpload(req.Reader)
-	if err != nil {
-		return Asset{}, err
+	// Read entire file to temp file (or reuse pre-streamed PreparedUpload)
+	var (
+		tmpFile   *os.File
+		sizeBytes int64
+		shaHex    string
+		sniff     []byte
+		err       error
+	)
+	if req.Prepared != nil && req.Prepared.TmpFile != nil {
+		tmpFile = req.Prepared.TmpFile
+		sizeBytes = req.Prepared.SizeBytes
+		shaHex = req.Prepared.SHA256
+		sniff = req.Prepared.Sniff
+		defer req.Prepared.Cleanup()
+	} else {
+		tmpFile, sizeBytes, shaHex, sniff, err = persistUpload(req.Reader)
+		if err != nil {
+			return Asset{}, err
+		}
+		defer os.Remove(tmpFile.Name())
+		defer tmpFile.Close()
 	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
 
 	mimeType, mediaKind, err := normalizeAndValidateMIME(req.FileName, req.DeclaredContentType, sniff)
 	if err != nil {
@@ -782,6 +827,78 @@ func (s *Service) cleanupExpiredSessionsLocked() {
 	}
 }
 
+// TryDedupBySHA256 checks if an active asset with the given SHA-256 already exists
+// and creates a soft-deduplicated metadata alias pointing to the same storage object.
+func (s *Service) TryDedupBySHA256(ctx context.Context, shaHex, project, usage string) (Asset, bool, error) {
+	shaHex = strings.ToLower(strings.TrimSpace(shaHex))
+	if len(shaHex) != 64 {
+		return Asset{}, false, nil
+	}
+	existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex)
+	if err != nil {
+		return Asset{}, false, nil
+	}
+
+	project = strings.TrimSpace(project)
+	if project == "" {
+		project = "default"
+	}
+	usage = strings.TrimSpace(usage)
+	if usage == "" {
+		if strings.HasPrefix(existingAsset.MIMEType, "image/") {
+			usage = "cover"
+		} else if strings.HasPrefix(existingAsset.MIMEType, "video/") {
+			usage = "scene"
+		} else if strings.HasPrefix(existingAsset.MIMEType, "audio/") {
+			usage = "audio"
+		} else {
+			usage = "file"
+		}
+	}
+	validUsages := map[string]bool{"cover": true, "scene": true, "avatar": true, "audio": true, "file": true}
+	if !validUsages[usage] {
+		return Asset{}, false, fmt.Errorf("usage must be one of: cover, scene, avatar, audio, file")
+	}
+
+	assetID := newUUID()
+	ext := extByMIME(existingAsset.MIMEType)
+	publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
+	asset, err := s.repo.Create(ctx, CreateAssetInput{
+		ID:                   assetID,
+		Provider:             existingAsset.Provider,
+		ProviderFileID:       existingAsset.ProviderFileID,
+		ProviderBucketOrChat: existingAsset.ProviderBucketOrChat,
+		PublicURL:            publicURL,
+		MIMEType:             existingAsset.MIMEType,
+		SizeBytes:            existingAsset.SizeBytes,
+		SHA256:               &shaHex,
+		Project:              project,
+		Usage:                usage,
+		IsChunked:            existingAsset.IsChunked,
+	})
+	if err != nil {
+		return Asset{}, false, fmt.Errorf("duplicate asset metadata creation failed: %w", err)
+	}
+	if existingAsset.IsChunked {
+		chunks, err := s.repo.GetChunks(ctx, existingAsset.ID)
+		if err != nil {
+			return Asset{}, false, fmt.Errorf("duplicate asset get chunks failed: %w", err)
+		}
+		newChunks := make([]Chunk, len(chunks))
+		for i, c := range chunks {
+			newChunks[i] = Chunk{
+				AssetID:     assetID,
+				ChunkIndex:  c.ChunkIndex,
+				ChunkFileID: c.ChunkFileID,
+			}
+		}
+		if err := s.repo.SaveChunks(ctx, assetID, newChunks); err != nil {
+			return Asset{}, false, fmt.Errorf("duplicate asset save chunks failed: %w", err)
+		}
+	}
+	return asset, true, nil
+}
+
 func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (InitUploadOutput, error) {
 	project := strings.TrimSpace(in.Project)
 	if project == "" {
@@ -818,50 +935,13 @@ func (s *Service) InitChunkedUpload(ctx context.Context, in InitUploadInput) (In
 	}
 
 	// Instant deduplication pre-check if client provided SHA-256
-	shaHex := strings.ToLower(strings.TrimSpace(in.SHA256))
-	if len(shaHex) == 64 {
-		if existingAsset, err := s.repo.GetActiveBySHA256(ctx, shaHex); err == nil {
-			assetID := newUUID()
-			ext := extByMIME(existingAsset.MIMEType)
-			publicURL := fmt.Sprintf("/media/%s%s", assetID, ext)
-			asset, err := s.repo.Create(ctx, CreateAssetInput{
-				ID:                   assetID,
-				Provider:             existingAsset.Provider,
-				ProviderFileID:       existingAsset.ProviderFileID,
-				ProviderBucketOrChat: existingAsset.ProviderBucketOrChat,
-				PublicURL:            publicURL,
-				MIMEType:             existingAsset.MIMEType,
-				SizeBytes:            existingAsset.SizeBytes,
-				SHA256:               &shaHex,
-				Project:              project,
-				Usage:                usage,
-				IsChunked:            existingAsset.IsChunked,
-			})
-			if err != nil {
-				return InitUploadOutput{}, fmt.Errorf("duplicate asset metadata creation failed: %w", err)
-			}
-			if existingAsset.IsChunked {
-				chunks, err := s.repo.GetChunks(ctx, existingAsset.ID)
-				if err != nil {
-					return InitUploadOutput{}, fmt.Errorf("duplicate asset get chunks failed: %w", err)
-				}
-				newChunks := make([]Chunk, len(chunks))
-				for i, c := range chunks {
-					newChunks[i] = Chunk{
-						AssetID:     assetID,
-						ChunkIndex:  c.ChunkIndex,
-						ChunkFileID: c.ChunkFileID,
-					}
-				}
-				if err := s.repo.SaveChunks(ctx, assetID, newChunks); err != nil {
-					return InitUploadOutput{}, fmt.Errorf("duplicate asset save chunks failed: %w", err)
-				}
-			}
-			return InitUploadOutput{
-				Duplicated: true,
-				Asset:      &asset,
-			}, nil
-		}
+	if asset, hit, err := s.TryDedupBySHA256(ctx, in.SHA256, project, usage); err != nil {
+		return InitUploadOutput{}, err
+	} else if hit {
+		return InitUploadOutput{
+			Duplicated: true,
+			Asset:      &asset,
+		}, nil
 	}
 
 	tmpFile, err := os.CreateTemp("", "media-session-*")
@@ -922,6 +1002,8 @@ func (s *Service) WriteUploadChunk(_ context.Context, uploadID string, chunkInde
 	buf := make([]byte, 256*1024)
 	var written int64
 	var sniffHead []byte
+	var singleHasher = sha256.New()
+	isSingleChunk := sess.totalChunks == 1 && chunkIndex == 0
 
 	for {
 		n, readErr := src.Read(buf)
@@ -935,6 +1017,9 @@ func (s *Service) WriteUploadChunk(_ context.Context, uploadID string, chunkInde
 					need = n
 				}
 				sniffHead = append(sniffHead, buf[:need]...)
+			}
+			if isSingleChunk {
+				_, _ = singleHasher.Write(buf[:n])
 			}
 			if _, wErr := sess.tmpFile.WriteAt(buf[:n], startOffset+written); wErr != nil {
 				return 0, 0, fmt.Errorf("write chunk at offset: %w", wErr)
@@ -952,6 +1037,9 @@ func (s *Service) WriteUploadChunk(_ context.Context, uploadID string, chunkInde
 	sess.mu.Lock()
 	if chunkIndex == 0 && len(sniffHead) > 0 {
 		sess.sniff = sniffHead
+	}
+	if isSingleChunk && written == sess.sizeBytes {
+		sess.singleChunkSHA = hex.EncodeToString(singleHasher.Sum(nil))
 	}
 	sess.received[chunkIndex] = true
 	receivedCount := len(sess.received)
@@ -984,6 +1072,7 @@ func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, ov
 		return Asset{}, fmt.Errorf("upload incomplete: received %d/%d chunks", len(sess.received), sess.totalChunks)
 	}
 	sniff := sess.sniff
+	precomputedSHA := sess.singleChunkSHA
 	sess.mu.Unlock()
 
 	p := overrideProvider
@@ -1027,14 +1116,21 @@ func (s *Service) CompleteChunkedUpload(ctx context.Context, uploadID string, ov
 		return Asset{}, fmt.Errorf("file exceeds %d bytes: %w", maxFileSizeBytes, ErrFileTooLarge)
 	}
 
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		return Asset{}, fmt.Errorf("rewind session file: %w", err)
+	shaHex := precomputedSHA
+	if shaHex == "" {
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return Asset{}, fmt.Errorf("rewind session file: %w", err)
+		}
+		h := sha256.New()
+		if _, err := io.CopyBuffer(h, io.LimitReader(tmpFile, sizeBytes), make([]byte, 256*1024)); err != nil {
+			return Asset{}, fmt.Errorf("hash session file: %w", err)
+		}
+		shaHex = hex.EncodeToString(h.Sum(nil))
+	} else {
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return Asset{}, fmt.Errorf("rewind session file: %w", err)
+		}
 	}
-	h := sha256.New()
-	if _, err := io.CopyBuffer(h, io.LimitReader(tmpFile, sizeBytes), make([]byte, 256*1024)); err != nil {
-		return Asset{}, fmt.Errorf("hash session file: %w", err)
-	}
-	shaHex := hex.EncodeToString(h.Sum(nil))
 
 	usage := sess.usage
 	if usage == "" {
