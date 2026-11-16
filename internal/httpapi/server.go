@@ -1127,9 +1127,14 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // API directly. Without this, browsers block cross-origin requests because
 // the method-scoped ServeMux answers OPTIONS with 405.
 func (s *Server) withCORS(next http.Handler) http.Handler {
-	const allowedHeaders = "Authorization, Content-Type, X-Bot-Name, X-Worker-Base-URL, X-Worker-Auth-Token, X-Storage-Mode, X-Project, X-Usage"
+	const allowedHeaders = "Authorization, Content-Type, Range, X-Bot-Name, X-Worker-Base-URL, X-Worker-Auth-Token, X-Storage-Mode, X-Project, X-Usage, X-Content-SHA256"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
+		// Always emit `Access-Control-Allow-Origin: *` on public media endpoints so CDN caches
+		// never store a CORS-less response from a non-Origin request (e.g. curl/<img>) and break
+		// subsequent Canvas/MiniProgram CORS requests.
+		if strings.HasPrefix(r.URL.Path, "/media/") || strings.HasSuffix(r.URL.Path, "/stream") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin := r.Header.Get("Origin"); origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Add("Vary", "Origin")
 		}
