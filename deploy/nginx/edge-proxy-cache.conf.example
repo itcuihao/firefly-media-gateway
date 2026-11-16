@@ -1,0 +1,39 @@
+# Firefly Media Gateway - Edge Cache Reverse Proxy Example (for domestic / HK relay nodes)
+#
+# Use this on a relay node (e.g. gd1/sh1 with an ICP-filed domain, or an HK optimized VPS)
+# to cache immutable /media/* objects locally on SSD while pulling misses from the origin server.
+
+proxy_cache_path /var/cache/nginx/firefly_media levels=1:2 keys_zone=firefly_media:100m max_size=30g inactive=30d use_temp_path=off;
+
+server {
+    server_name cdn.example.com;
+
+    listen 443 ssl http2;
+    ssl_certificate /etc/letsencrypt/live/cdn.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cdn.example.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location /media/ {
+        # Point directly to the origin server IP/port (bypassing CF between relay and origin)
+        proxy_pass http://ORIGIN_SERVER_IP:9090;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host firefly.example.com;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        proxy_cache firefly_media;
+        proxy_cache_key "$scheme$proxy_host$uri$is_args$args|$http_accept";
+        proxy_cache_valid 200 30d;
+        proxy_cache_lock on;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+
+        # Enable byte-range slicing from cached objects
+        slice 5m;
+        proxy_set_header Range $slice_range;
+        proxy_cache_key "$scheme$proxy_host$uri$is_args$args|$slice_range|$http_accept";
+
+        add_header X-Edge-Cache $upstream_cache_status;
+    }
+}
