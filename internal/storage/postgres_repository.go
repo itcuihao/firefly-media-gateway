@@ -642,8 +642,11 @@ func nullableString(v *string) any {
 }
 
 func Ping(ctx context.Context, db *sql.DB) error {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
 	}

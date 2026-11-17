@@ -45,7 +45,7 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
-	db, repo, err := openRepository(context.Background(), cfg)
+	db, repo, err := openRepository(context.Background(), cfg, logger)
 	if err != nil {
 		logger.Fatalf("open repository: %v", err)
 	}
@@ -104,17 +104,20 @@ func main() {
 	}
 }
 
-func openRepository(ctx context.Context, cfg config.Config) (*sql.DB, media.Repository, error) {
+func openRepository(ctx context.Context, cfg config.Config, logger *log.Logger) (*sql.DB, media.Repository, error) {
 	switch cfg.DatabaseDriver {
 	case "postgres":
 		db, err := sql.Open("pgx", cfg.DatabaseURL)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open postgres: %w", err)
 		}
-		if err := storage.Ping(ctx, db); err != nil {
+		if err := pingWithRetry(ctx, db, 5, 2*time.Second, logger); err != nil {
 			db.Close()
 			return nil, nil, fmt.Errorf("postgres not ready: %w", err)
 		}
+		// Pool tuning for public WAN & high concurrency
+		db.SetMaxOpenConns(30)
+		db.SetMaxIdleConns(10)
 		// Recycle connections before NAT/firewall idle timeouts on the public
 		// internet silently drop them. Without this, the pool hands out dead
 		// connections after the process sits idle, and queries start returning
@@ -145,6 +148,33 @@ func openRepository(ctx context.Context, cfg config.Config) (*sql.DB, media.Repo
 	default:
 		return nil, nil, fmt.Errorf("unsupported database driver %q", cfg.DatabaseDriver)
 	}
+}
+
+func pingWithRetry(ctx context.Context, db *sql.DB, maxAttempts int, retryInterval time.Duration, logger *log.Logger) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := db.PingContext(pingCtx)
+		cancel()
+		if err == nil {
+			if attempt > 1 && logger != nil {
+				logger.Printf("database connection established on attempt %d", attempt)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt < maxAttempts {
+			if logger != nil {
+				logger.Printf("[WARN] database connection attempt %d/%d failed: %v, retrying in %v...", attempt, maxAttempts, err, retryInterval)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryInterval):
+			}
+		}
+	}
+	return fmt.Errorf("ping failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func ensureSQLiteDir(databaseURL string) error {
