@@ -31,9 +31,11 @@ func (s *Server) frontendHandler() http.Handler {
 
 		// 1. 请求根路径或 index.html：直接禁用缓存，确保客户端/CDN每次获取最新入口
 		if cleanPath == "" || cleanPath == "index.html" {
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
+			w.Header().Set("CDN-Cache-Control", "no-store")
+			w.Header().Set("Cloudflare-CDN-Cache-Control", "no-store")
 			fileServer.ServeHTTP(w, r)
 			return
 		}
@@ -60,9 +62,11 @@ func (s *Server) frontendHandler() http.Handler {
 		}
 
 		// 4. SPA 页面路由（如 /dashboard, /gallery, /sandbox），回退到 index.html 并禁用缓存
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
+		w.Header().Set("CDN-Cache-Control", "no-store")
+		w.Header().Set("Cloudflare-CDN-Cache-Control", "no-store")
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/"
 		fileServer.ServeHTTP(w, r2)
