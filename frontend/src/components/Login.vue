@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, inject } from 'vue'
-import { setApiToken, apiRequest } from '../api'
+import { setApiToken, verifyAuth } from '../api'
 
 const emit = defineEmits(['login-success'])
 const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('showToast', () => {})
@@ -21,16 +21,16 @@ async function handleLogin() {
   }
 
   loading.value = true
-  // Temporarily set token to test auth
   setApiToken(pwd)
 
   try {
-    // Attempt a light API request to verify the token
-    await apiRequest('/api/v1/media?limit=1')
+    const ok = await verifyAuth()
+    if (!ok) {
+      throw new Error('密码错误，鉴权失败！')
+    }
     showToast('登录成功！')
     emit('login-success')
   } catch (err: any) {
-    // Clear token on failure
     setApiToken('')
     showToast(err.message || '密码错误，鉴权失败！', 'error')
   } finally {

@@ -405,4 +405,24 @@ func TestCORSAndStreamingHeaders(t *testing.T) {
 	if !strings.Contains(statsRR.Body.String(), `"total_count":1`) {
 		t.Errorf("expected total_count: 1 in stats response, got %s", statsRR.Body.String())
 	}
+
+	// 4. GET /api/v1/auth/verify without token -> 401
+	unauthReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/verify", nil)
+	unauthRR := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRR, unauthReq)
+	if unauthRR.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401 for unauthenticated /api/v1/auth/verify, got %d", unauthRR.Code)
+	}
+
+	// 5. GET /api/v1/auth/verify with correct Bearer token -> 200
+	authReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/verify", nil)
+	authReq.Header.Set("Authorization", "Bearer test-token")
+	authRR := httptest.NewRecorder()
+	handler.ServeHTTP(authRR, authReq)
+	if authRR.Code != http.StatusOK {
+		t.Errorf("expected status 200 for authenticated /api/v1/auth/verify, got %d", authRR.Code)
+	}
+	if !strings.Contains(authRR.Body.String(), `"authenticated":true`) {
+		t.Errorf("expected authenticated: true in response, got %s", authRR.Body.String())
+	}
 }

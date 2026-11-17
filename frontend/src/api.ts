@@ -69,6 +69,17 @@ export function setApiToken(token: string) {
   localStorage.setItem('media_gateway_token', token.trim())
 }
 
+export async function verifyAuth(): Promise<boolean> {
+  const token = getApiToken()
+  if (!token) return false
+  try {
+    const res = await apiRequest<{ authenticated: boolean }>('/api/v1/auth/verify')
+    return !!res?.authenticated
+  } catch {
+    return false
+  }
+}
+
 // Fetch wrapper with auth header injection
 export function buildApiUrl(path: string): string {
   const baseUrl = getApiBaseUrl()

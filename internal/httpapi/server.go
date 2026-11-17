@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/auth/verify", s.withAuth(s.handleAuthVerify))
 
 	// Vue 3 + Naive UI 前端 SPA（嵌入到二进制，由 embed.go 提供）
 	// /admin 无斜杠时重定向，/admin/ 开头统一走 SPA handler
@@ -164,6 +165,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"database_driver": s.databaseDriver,
 		"storage_driver":  storageMode,
 		"worker_url":      workerURL,
+	})
+}
+
+func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"authenticated": true,
 	})
 }
 

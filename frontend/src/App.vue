@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, provide, onMounted, onUnmounted } from 'vue'
 import { LOGO_BASE64 } from './logo'
-import { getApiBaseUrl, setApiBaseUrl, getApiToken, setApiToken, apiRequest } from './api'
+import { getApiBaseUrl, setApiBaseUrl, getApiToken, setApiToken, verifyAuth, apiRequest } from './api'
 import type { HealthInfo } from './api'
 import Gallery from './components/Gallery.vue'
 import Login from './components/Login.vue'
@@ -82,14 +82,16 @@ async function checkAuth() {
     return
   }
   try {
-    // Check if token is valid
-    await apiRequest('/api/v1/media?limit=1')
-    isLoggedIn.value = true
-  } catch (err: any) {
-    isLoggedIn.value = false
-    if (err.status === 401) {
-      setApiToken('') // Clear invalid token
+    const ok = await verifyAuth()
+    if (ok) {
+      isLoggedIn.value = true
+    } else {
+      isLoggedIn.value = false
+      setApiToken('')
     }
+  } catch {
+    isLoggedIn.value = false
+    setApiToken('')
   }
 }
 
@@ -202,11 +204,11 @@ onUnmounted(() => {
     
     <!-- Navigation Drawer Backdrop -->
     <Transition name="drawer-fade">
-      <div v-if="drawerOpen && isLoggedIn" class="drawer-backdrop" @click="drawerOpen = false"></div>
+      <div v-if="drawerOpen && isLoggedIn && activeTab !== 'login'" class="drawer-backdrop" @click="drawerOpen = false"></div>
     </Transition>
 
     <!-- Navigation Drawer -->
-    <nav v-if="isLoggedIn" :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
+    <nav v-if="isLoggedIn && activeTab !== 'login'" :class="['nav-drawer', { active: drawerOpen }]" id="navDrawer">
       <div class="nav-brand" @click="switchTab('gallery')" style="cursor: pointer;">
         <div class="logo-wrapper">
           <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" />
@@ -258,16 +260,16 @@ onUnmounted(() => {
     </nav>
 
     <!-- Content Workspace -->
-    <div :class="['main-wrapper', { 'full-width': !isLoggedIn }]">
+    <div :class="['main-wrapper', { 'full-width': !isLoggedIn || activeTab === 'login' }]">
       
       <!-- Top App Bar Header -->
       <header class="top-app-bar">
         <div class="top-app-bar-left">
-          <button v-if="isLoggedIn" class="menu-toggle" @click="toggleDrawer" aria-label="切换菜单">
+          <button v-if="isLoggedIn && activeTab !== 'login'" class="menu-toggle" @click="toggleDrawer" aria-label="切换菜单">
             <span class="material-symbols-rounded" style="font-size: 28px;">menu</span>
           </button>
           
-          <div v-if="!isLoggedIn" class="guest-brand" @click="switchTab('gallery')" style="cursor: pointer; display: flex; align-items: center; gap: 12px;">
+          <div v-if="!isLoggedIn || activeTab === 'login'" class="guest-brand" @click="switchTab('gallery')" style="cursor: pointer; display: flex; align-items: center; gap: 12px;">
             <div class="logo-wrapper" style="width: 32px; height: 32px; position: relative; flex-shrink: 0;">
               <img :src="`data:image/png;base64,${LOGO_BASE64}`" alt="Firefly Logo" class="logo-img" style="width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.4));" />
             </div>
@@ -286,7 +288,7 @@ onUnmounted(() => {
         <div class="global-actions">
           <!-- Storage Mode Badge -->
           <div 
-            v-if="isLoggedIn"
+            v-if="isLoggedIn && activeTab !== 'login'"
             :class="['mode-badge-btn', isWorkerMode ? 'worker-active' : 'direct-active']" 
             :title="isWorkerMode ? '当前为 CF Worker 代理模式' : '当前直连后端 Telegram 存储'"
           >
@@ -296,12 +298,17 @@ onUnmounted(() => {
             <span class="mode-badge-label">{{ isWorkerMode ? activeWorkerName : '直连 TG 模式' }}</span>
           </div>
 
-          <button v-if="isLoggedIn" :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown" title="网关连接配置" aria-label="网关连接配置">
+          <button v-if="isLoggedIn && activeTab !== 'login'" :class="['config-trigger', { active: configOpen }]" id="configBtn" @click="toggleConfigDropdown" title="网关连接配置" aria-label="网关连接配置">
             <span class="material-symbols-rounded" style="font-size: 18px;">settings</span>
             <span class="config-trigger-label">网关连接配置</span>
           </button>
 
-          <button v-if="!isLoggedIn && activeTab !== 'login'" class="m3-btn m3-btn-primary m3-btn-sm" @click="switchTab('login')">
+          <button v-if="activeTab === 'login'" class="m3-btn m3-btn-outlined m3-btn-sm" @click="switchTab('gallery')" style="display: flex; align-items: center; gap: 6px;">
+            <span class="material-symbols-rounded" style="font-size: 16px;">arrow_back</span>
+            <span>返回画廊</span>
+          </button>
+
+          <button v-else-if="!isLoggedIn" class="m3-btn m3-btn-primary m3-btn-sm" @click="switchTab('login')">
             <span class="material-symbols-rounded" style="font-size: 16px;">login</span>
             <span class="login-btn-label">登录后台</span>
           </button>
@@ -341,6 +348,8 @@ onUnmounted(() => {
           <BotVerifier v-else-if="activeTab === 'verifier'" />
           <ApiSandbox v-else-if="activeTab === 'sandbox'" />
         </template>
+        <!-- Security Fallback: If not logged in and not on login page, force Gallery -->
+        <Gallery v-else />
       </main>
     </div>
   </div>
