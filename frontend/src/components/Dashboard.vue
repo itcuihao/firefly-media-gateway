@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, inject } from 'vue'
 import { apiRequest, getApiToken } from '../api'
-import type { HealthInfo, MediaAsset } from '../api'
+import type { HealthInfo, MediaStats } from '../api'
 
 const emit = defineEmits(['switch-tab'])
 
@@ -9,13 +9,12 @@ const showToast = inject<(msg: string, type?: 'success' | 'error') => void>('sho
 
 const loading = ref(true)
 const health = ref<HealthInfo | null>(null)
-const mediaList = ref<MediaAsset[]>([])
-const totalCountInDb = ref<number | null>(null)
+const statsData = ref<MediaStats | null>(null)
 const apiToken = ref(getApiToken())
 
-// Dynamic data counters computed from loaded media assets
+// Dynamic data counters computed from real database aggregate statistics
 const mediaStats = computed(() => {
-  if (loading.value) {
+  if (loading.value || !statsData.value) {
     return {
       totalCount: '--',
       totalSize: '--',
@@ -25,50 +24,24 @@ const mediaStats = computed(() => {
     }
   }
 
-  const list = Array.isArray(mediaList.value) ? mediaList.value : []
-  let imgCount = 0
-  let imgBytes = 0
-  let vidCount = 0
-  let vidBytes = 0
-  let otherCount = 0
-  let otherBytes = 0
-  let totalBytes = 0
-
-  list.forEach(asset => {
-    totalBytes += asset.sizeBytes
-    const mime = asset.mimeType.toLowerCase()
-    if (mime.startsWith('image/')) {
-      imgCount++
-      imgBytes += asset.sizeBytes
-    } else if (mime.startsWith('video/')) {
-      vidCount++
-      vidBytes += asset.sizeBytes
-    } else {
-      otherCount++
-      otherBytes += asset.sizeBytes
-    }
-  })
-
-  const sampleCount = list.length
-  const totalCount = totalCountInDb.value !== null ? totalCountInDb.value : sampleCount
-
+  const s = statsData.value
   return {
-    totalCount: String(totalCount),
-    totalSize: formatBytes(totalBytes),
+    totalCount: String(s.total_count),
+    totalSize: formatBytes(s.total_bytes),
     images: {
-      count: String(imgCount),
-      size: formatBytes(imgBytes),
-      percent: sampleCount > 0 ? (imgCount / sampleCount) * 100 : 0
+      count: String(s.images.count),
+      size: formatBytes(s.images.bytes),
+      percent: s.images.percent
     },
     videos: {
-      count: String(vidCount),
-      size: formatBytes(vidBytes),
-      percent: sampleCount > 0 ? (vidCount / sampleCount) * 100 : 0
+      count: String(s.videos.count),
+      size: formatBytes(s.videos.bytes),
+      percent: s.videos.percent
     },
     others: {
-      count: String(otherCount),
-      size: formatBytes(otherBytes),
-      percent: sampleCount > 0 ? (otherCount / sampleCount) * 100 : 0
+      count: String(s.others.count),
+      size: formatBytes(s.others.bytes),
+      percent: s.others.percent
     }
   }
 })
@@ -91,33 +64,18 @@ const healthStatusColor = computed(() => {
 async function fetchStats() {
   loading.value = true
   try {
-    const healthData = await apiRequest<HealthInfo>('/api/v1/health')
-    health.value = healthData
-  } catch (err: any) {
-    console.error('Failed to fetch health info:', err)
-  }
-
-  try {
-    interface MediaResponse {
-      total: number
-      limit: number
-      offset: number
-      items: MediaAsset[]
-    }
-    const resData = await apiRequest<MediaResponse | MediaAsset[]>('/api/v1/media?limit=100')
-    if (Array.isArray(resData)) {
-      mediaList.value = resData
-      totalCountInDb.value = resData.length
-    } else if (resData && Array.isArray(resData.items)) {
-      mediaList.value = resData.items
-      totalCountInDb.value = typeof resData.total === 'number' ? resData.total : resData.items.length
-    } else {
-      mediaList.value = []
-      totalCountInDb.value = 0
-    }
+    const [healthData, stats] = await Promise.all([
+      apiRequest<HealthInfo>('/api/v1/health').catch((err) => {
+        console.error('Failed to fetch health info:', err)
+        return null
+      }),
+      apiRequest<MediaStats>('/api/v1/media/stats')
+    ])
+    if (healthData) health.value = healthData
+    statsData.value = stats
   } catch (err: any) {
     showToast('拉取资源失败，请检查 Bearer Token 配置', 'error')
-    console.error('Failed to fetch media assets list:', err)
+    console.error('Failed to fetch media assets stats:', err)
   } finally {
     loading.value = false
   }

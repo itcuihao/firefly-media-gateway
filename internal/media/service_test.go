@@ -160,7 +160,11 @@ func (r *fakeRepository) Count(context.Context, ListFilter) (int, error) {
 	return 0, nil
 }
 
-func (r *fakeRepository) GetDistinctProjects(context.Context, bool, []string) ([]string, error) {
+func (r *fakeRepository) GetStats(context.Context, ListFilter) (MediaStats, error) {
+	return MediaStats{}, nil
+}
+
+func (r *fakeRepository) GetDistinctProjects(context.Context, bool, []string, []string) ([]string, error) {
 	return nil, nil
 }
 

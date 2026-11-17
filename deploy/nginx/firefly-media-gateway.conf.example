@@ -17,28 +17,14 @@ server {
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
-    # Match the gateway's 2GB max video size and stream uploads directly without Nginx disk buffering
+    # Stream uploads directly without Nginx disk buffering (matching 2GB limit)
     client_max_body_size 2G;
     proxy_request_buffering off;
 
-    # Media streaming & download (/media/ and /api/v1/media/*/stream)
-    # Trust dynamic Cache-Control & CORS headers emitted by the Go gateway
-    # (public -> max-age=31536000, immutable; private -> private, no-cache).
-    location /media/ {
-        proxy_pass http://127.0.0.1:9090;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Disable response buffering so Range video seeks and large downloads stream immediately
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-    }
-
-    # Admin UI, upload API, S3 gateway, and other endpoints
+    # Reverse proxy all requests to Firefly Media Gateway.
+    # Note: For media streaming routes (/media/* and /api/v1/media/*/stream),
+    # the Go backend also emits `X-Accel-Buffering: no`, ensuring video seeks
+    # and large file downloads stream immediately without disk buffering.
     location / {
         proxy_pass http://127.0.0.1:9090;
         proxy_http_version 1.1;
@@ -48,6 +34,8 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # Disable response buffering for instant TTFB on streams and Range seeks
+        proxy_buffering off;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
     }

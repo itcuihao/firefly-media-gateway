@@ -38,6 +38,20 @@ export interface HealthInfo {
   commit?: string
 }
 
+export interface MediaTypeStats {
+  count: number
+  bytes: number
+  percent: number
+}
+
+export interface MediaStats {
+  total_count: number
+  total_bytes: number
+  images: MediaTypeStats
+  videos: MediaTypeStats
+  others: MediaTypeStats
+}
+
 // Global configuration helpers
 export function getApiBaseUrl(): string {
   return localStorage.getItem('media_gateway_url') || ''

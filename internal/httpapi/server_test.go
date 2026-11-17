@@ -47,7 +47,18 @@ func (r *mockRepository) List(ctx context.Context, filter media.ListFilter) ([]m
 func (r *mockRepository) Count(ctx context.Context, filter media.ListFilter) (int, error) {
 	return 1, nil
 }
-func (r *mockRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+func (r *mockRepository) GetStats(ctx context.Context, filter media.ListFilter) (media.MediaStats, error) {
+	return media.MediaStats{
+		TotalCount: 1,
+		TotalBytes: r.asset.SizeBytes,
+		Images: media.MediaTypeStats{
+			Count:   1,
+			Bytes:   r.asset.SizeBytes,
+			Percent: 100,
+		},
+	}, nil
+}
+func (r *mockRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string, allowedProjects []string) ([]string, error) {
 	return nil, nil
 }
 func (r *mockRepository) GetDistinctUsages(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
@@ -328,5 +339,70 @@ func TestPrivateAssetCacheControl(t *testing.T) {
 	cc := rr.Header().Get("Cache-Control")
 	if !strings.Contains(cc, "private") || strings.Contains(cc, "public") {
 		t.Errorf("expected private Cache-Control for private asset, got %q", cc)
+	}
+	if xab := rr.Header().Get("X-Accel-Buffering"); xab != "no" {
+		t.Errorf("expected X-Accel-Buffering: no, got %q", xab)
+	}
+}
+
+func TestCORSAndStreamingHeaders(t *testing.T) {
+	repo := &mockRepository{
+		asset: media.Asset{
+			ID:        "sample-media",
+			Provider:  "mock",
+			MIMEType:  "image/jpeg",
+			SizeBytes: 1024,
+			Status:    media.StatusActive,
+		},
+	}
+	prov := &mockProvider{url: "http://mock.url"}
+	svc := media.NewService(repo, map[string]provider.StorageProvider{"mock": prov}, "mock", "http://localhost:8080")
+	logger := log.New(io.Discard, "", 0)
+	srv := NewServer(svc, "test-token", "", "", "", "http://localhost:8080", nil, "sqlite", "direct", "test-commit", logger)
+	handler := srv.Handler()
+
+	// 1. OPTIONS preflight
+	optReq := httptest.NewRequest(http.MethodOptions, "/api/v1/media/sample-media", nil)
+	optReq.Header.Set("Origin", "https://example.com")
+	optReq.Header.Set("Access-Control-Request-Method", "GET")
+	optRR := httptest.NewRecorder()
+	handler.ServeHTTP(optRR, optReq)
+
+	if optRR.Code != http.StatusNoContent {
+		t.Errorf("expected status 204 for OPTIONS preflight, got %d", optRR.Code)
+	}
+	if origin := optRR.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Errorf("expected Access-Control-Allow-Origin: *, got %q", origin)
+	}
+	if maxAge := optRR.Header().Get("Access-Control-Max-Age"); maxAge != "86400" {
+		t.Errorf("expected Access-Control-Max-Age: 86400, got %q", maxAge)
+	}
+
+	// 2. GET health check (non-media route) should also have wildcard CORS and exposed headers
+	healthReq := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	healthRR := httptest.NewRecorder()
+	handler.ServeHTTP(healthRR, healthReq)
+
+	if origin := healthRR.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Errorf("expected Access-Control-Allow-Origin: * on health route, got %q", origin)
+	}
+	expose := healthRR.Header().Get("Access-Control-Expose-Headers")
+	if !strings.Contains(expose, "Content-Range") || !strings.Contains(expose, "ETag") {
+		t.Errorf("expected Access-Control-Expose-Headers to include Content-Range and ETag, got %q", expose)
+	}
+	if vary := healthRR.Header().Get("Vary"); strings.Contains(vary, "Origin") {
+		t.Errorf("expected no Vary: Origin header with wildcard CORS, got %q", vary)
+	}
+
+	// 3. GET /api/v1/media/stats
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/v1/media/stats", nil)
+	statsRR := httptest.NewRecorder()
+	handler.ServeHTTP(statsRR, statsReq)
+
+	if statsRR.Code != http.StatusOK {
+		t.Errorf("expected status 200 for /api/v1/media/stats, got %d", statsRR.Code)
+	}
+	if !strings.Contains(statsRR.Body.String(), `"total_count":1`) {
+		t.Errorf("expected total_count: 1 in stats response, got %s", statsRR.Body.String())
 	}
 }

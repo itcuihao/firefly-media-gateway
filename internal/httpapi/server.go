@@ -114,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/media/upload/{uploadId}/chunk", s.withAuth(s.handleUploadChunk))
 	mux.HandleFunc("POST /api/v1/media/upload/{uploadId}/complete", s.withAuth(s.handleUploadComplete))
 	mux.HandleFunc("GET /api/v1/media", s.handleListMedia)
+	mux.HandleFunc("GET /api/v1/media/stats", s.handleGetStats)
 	mux.HandleFunc("GET /api/v1/media/projects", s.handleGetProjects)
 	mux.HandleFunc("GET /api/v1/media/usages", s.handleGetUsages)
 	mux.HandleFunc("GET /api/v1/media/{mediaId}/meta", s.withAuth(s.handleGetMeta))
@@ -469,6 +470,7 @@ func (s *Server) serveMediaBinary(w http.ResponseWriter, r *http.Request) {
 		cacheControl = "private, no-cache"
 	}
 	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Calculate immutable ETag for caching
 	etag := fmt.Sprintf("%q", asset.ID)
@@ -1121,23 +1123,18 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withCORS handles CORS preflight requests and injects permissive CORS
-// headers on every response. The gateway uses Bearer tokens (not cookies),
-// so we mirror the worker's policy (workers/src/index.ts handleOptions) by
-// reflecting the request Origin, allowing any front-end domain to call the
-// API directly. Without this, browsers block cross-origin requests because
-// the method-scoped ServeMux answers OPTIONS with 405.
+// headers on every response. The gateway uses Bearer tokens and presigned
+// HMAC URLs (not cookies), so we emit universal wildcard CORS headers (`*`),
+// avoiding Vary: Origin CDN cache fragmentation and preflight blocks.
 func (s *Server) withCORS(next http.Handler) http.Handler {
-	const allowedHeaders = "Authorization, Content-Type, Range, X-Bot-Name, X-Worker-Base-URL, X-Worker-Auth-Token, X-Storage-Mode, X-Project, X-Usage, X-Content-SHA256"
+	const (
+		allowedHeaders = "Authorization, Content-Type, Range, X-Bot-Name, X-Worker-Base-URL, X-Worker-Auth-Token, X-Storage-Mode, X-Project, X-Usage, X-Content-SHA256"
+		exposedHeaders = "Content-Length, Content-Range, Accept-Ranges, ETag"
+	)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always emit `Access-Control-Allow-Origin: *` on public media endpoints so CDN caches
-		// never store a CORS-less response from a non-Origin request (e.g. curl/<img>) and break
-		// subsequent Canvas/MiniProgram CORS requests.
-		if strings.HasPrefix(r.URL.Path, "/media/") || strings.HasSuffix(r.URL.Path, "/stream") {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		} else if origin := r.Header.Get("Origin"); origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Add("Vary", "Origin")
-		}
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Expose-Headers", exposedHeaders)
+
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS, HEAD")
 			w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
@@ -1205,6 +1202,9 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		OnlyPublic:   !hasAuth,
 		PrivateRules: s.privateRules,
 	}
+	if !hasAuth {
+		filter.AllowedProjects = []string{"default", "test-project"}
+	}
 
 	// Hide dummy (< 100 bytes) images: default to true unless explicitly disabled with hide_dummy=false/0
 	hideDummyVal := r.URL.Query().Get("hide_dummy")
@@ -1247,13 +1247,41 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	expected := "Bearer " + s.authToken
+	hasAuth := auth == expected
+
+	filter := media.ListFilter{
+		OnlyPublic:   !hasAuth,
+		PrivateRules: s.privateRules,
+		HideDummy:    true,
+		Status:       media.StatusActive,
+	}
+	if !hasAuth {
+		filter.AllowedProjects = []string{"default", "test-project"}
+	}
+
+	stats, err := s.svc.GetStats(r.Context(), filter)
+	if err != nil {
+		s.writeDomainError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
 func (s *Server) handleGetProjects(w http.ResponseWriter, r *http.Request) {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	expected := "Bearer " + s.authToken
 	hasAuth := auth == expected
 
 	onlyPublic := !hasAuth
-	projects, err := s.svc.GetProjects(r.Context(), onlyPublic, s.privateRules)
+	var allowedProjects []string
+	if !hasAuth {
+		allowedProjects = []string{"default", "test-project"}
+	}
+	projects, err := s.svc.GetProjects(r.Context(), onlyPublic, s.privateRules, allowedProjects)
 	if err != nil {
 		s.writeDomainError(w, r, err)
 		return

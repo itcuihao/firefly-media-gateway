@@ -146,6 +146,16 @@ WHERE 1=1
 		sb.WriteString(" AND size_bytes > 100")
 	}
 
+	if len(filter.AllowedProjects) > 0 {
+		var placeholders []string
+		for _, p := range filter.AllowedProjects {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+			args = append(args, p)
+			argCount++
+		}
+		sb.WriteString(fmt.Sprintf(" AND project IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
 		hasAll := false
 		var specificRules []string
@@ -244,6 +254,16 @@ func (r *PostgresRepository) Count(ctx context.Context, filter media.ListFilter)
 		sb.WriteString(" AND size_bytes > 100")
 	}
 
+	if len(filter.AllowedProjects) > 0 {
+		var placeholders []string
+		for _, p := range filter.AllowedProjects {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+			args = append(args, p)
+			argCount++
+		}
+		sb.WriteString(fmt.Sprintf(" AND project IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
 	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
 		hasAll := false
 		var specificRules []string
@@ -276,12 +296,115 @@ func (r *PostgresRepository) Count(ctx context.Context, filter media.ListFilter)
 	return count, nil
 }
 
-func (r *PostgresRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
+func (r *PostgresRepository) GetStats(ctx context.Context, filter media.ListFilter) (media.MediaStats, error) {
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`
+SELECT 
+    COUNT(*),
+    COALESCE(SUM(size_bytes), 0),
+    COUNT(CASE WHEN mime_type ILIKE 'image/%' THEN 1 END),
+    COALESCE(SUM(CASE WHEN mime_type ILIKE 'image/%' THEN size_bytes ELSE 0 END), 0),
+    COUNT(CASE WHEN mime_type ILIKE 'video/%' THEN 1 END),
+    COALESCE(SUM(CASE WHEN mime_type ILIKE 'video/%' THEN size_bytes ELSE 0 END), 0),
+    COUNT(CASE WHEN mime_type NOT ILIKE 'image/%' AND mime_type NOT ILIKE 'video/%' THEN 1 END),
+    COALESCE(SUM(CASE WHEN mime_type NOT ILIKE 'image/%' AND mime_type NOT ILIKE 'video/%' THEN size_bytes ELSE 0 END), 0)
+FROM media_assets WHERE 1=1`)
+
+	argCount := 1
+	if filter.Project != "" {
+		sb.WriteString(fmt.Sprintf(" AND project = $%d", argCount))
+		args = append(args, filter.Project)
+		argCount++
+	}
+	if filter.Usage != "" {
+		sb.WriteString(fmt.Sprintf(" AND usage = $%d", argCount))
+		args = append(args, filter.Usage)
+		argCount++
+	}
+	if filter.Status != "" {
+		sb.WriteString(fmt.Sprintf(" AND status = $%d", argCount))
+		args = append(args, filter.Status)
+		argCount++
+	} else {
+		sb.WriteString(" AND status = 'active'")
+	}
+	if filter.HideDummy {
+		sb.WriteString(" AND size_bytes > 100")
+	}
+	if len(filter.AllowedProjects) > 0 {
+		var placeholders []string
+		for _, p := range filter.AllowedProjects {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+			args = append(args, p)
+			argCount++
+		}
+		sb.WriteString(fmt.Sprintf(" AND project IN (%s)", strings.Join(placeholders, ", ")))
+	}
+	if filter.OnlyPublic && len(filter.PrivateRules) > 0 {
+		hasAll := false
+		var specificRules []string
+		for _, rule := range filter.PrivateRules {
+			if rule == "*" || rule == "all" {
+				hasAll = true
+				break
+			}
+			specificRules = append(specificRules, rule)
+		}
+		if hasAll {
+			return media.MediaStats{}, nil
+		} else if len(specificRules) > 0 {
+			var placeholders []string
+			for _, rule := range specificRules {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+				args = append(args, rule)
+				argCount++
+			}
+			inList := strings.Join(placeholders, ", ")
+			sb.WriteString(fmt.Sprintf(" AND project NOT IN (%s) AND usage NOT IN (%s)", inList, inList))
+		}
+	}
+
+	var stats media.MediaStats
+	err := r.db.QueryRowContext(ctx, sb.String(), args...).Scan(
+		&stats.TotalCount,
+		&stats.TotalBytes,
+		&stats.Images.Count,
+		&stats.Images.Bytes,
+		&stats.Videos.Count,
+		&stats.Videos.Bytes,
+		&stats.Others.Count,
+		&stats.Others.Bytes,
+	)
+	if err != nil {
+		return media.MediaStats{}, fmt.Errorf("get media stats: %w", err)
+	}
+
+	if stats.TotalCount > 0 {
+		stats.Images.Percent = float64(stats.Images.Count) / float64(stats.TotalCount) * 100.0
+		stats.Videos.Percent = float64(stats.Videos.Count) / float64(stats.TotalCount) * 100.0
+		stats.Others.Percent = float64(stats.Others.Count) / float64(stats.TotalCount) * 100.0
+	}
+
+	return stats, nil
+}
+
+func (r *PostgresRepository) GetDistinctProjects(ctx context.Context, onlyPublic bool, privateRules []string, allowedProjects []string) ([]string, error) {
 	var sb strings.Builder
 	var args []any
 	sb.WriteString("SELECT DISTINCT project FROM media_assets WHERE project <> ''")
 
 	argCount := 1
+	if len(allowedProjects) > 0 {
+		var placeholders []string
+		for _, p := range allowedProjects {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", argCount))
+			args = append(args, p)
+			argCount++
+		}
+		sb.WriteString(fmt.Sprintf(" AND project IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
 	if onlyPublic && len(privateRules) > 0 {
 		hasAll := false
 		var specificRules []string

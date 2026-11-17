@@ -638,8 +638,12 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]Asset, int, er
 	return assets, total, nil
 }
 
-func (s *Service) GetProjects(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {
-	return s.repo.GetDistinctProjects(ctx, onlyPublic, privateRules)
+func (s *Service) GetStats(ctx context.Context, filter ListFilter) (MediaStats, error) {
+	return s.repo.GetStats(ctx, filter)
+}
+
+func (s *Service) GetProjects(ctx context.Context, onlyPublic bool, privateRules []string, allowedProjects []string) ([]string, error) {
+	return s.repo.GetDistinctProjects(ctx, onlyPublic, privateRules, allowedProjects)
 }
 
 func (s *Service) GetUsages(ctx context.Context, onlyPublic bool, privateRules []string) ([]string, error) {

@@ -168,3 +168,88 @@ func TestSQLiteRepositoryHideDummy(t *testing.T) {
 		t.Fatalf("expected 2 items with HideDummy=false, got %d", len(listAll))
 	}
 }
+
+func TestSQLiteRepositoryGetStatsAndAllowedProjects(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if err := EnsureSQLiteSchema(ctx, db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	repo := NewSQLiteRepository(db)
+
+	// Insert 1 image in default, 1 video in test-project, 1 file in secret-project
+	_, _ = repo.Create(ctx, media.CreateAssetInput{
+		ID:        "img-1",
+		Provider:  "tg",
+		PublicURL: "/media/img-1.jpg",
+		MIMEType:  "image/jpeg",
+		SizeBytes: 1000,
+		Project:   "default",
+		Usage:     "cover",
+	})
+	_, _ = repo.Create(ctx, media.CreateAssetInput{
+		ID:        "vid-1",
+		Provider:  "tg",
+		PublicURL: "/media/vid-1.mp4",
+		MIMEType:  "video/mp4",
+		SizeBytes: 5000,
+		Project:   "test-project",
+		Usage:     "scene",
+	})
+	_, _ = repo.Create(ctx, media.CreateAssetInput{
+		ID:        "doc-1",
+		Provider:  "tg",
+		PublicURL: "/media/doc-1.pdf",
+		MIMEType:  "application/pdf",
+		SizeBytes: 2000,
+		Project:   "secret-project",
+		Usage:     "file",
+	})
+
+	// 1. Full Stats without allowedProjects filter
+	allStats, err := repo.GetStats(ctx, media.ListFilter{Status: "active"})
+	if err != nil {
+		t.Fatalf("GetStats failed: %v", err)
+	}
+	if allStats.TotalCount != 3 || allStats.TotalBytes != 8000 {
+		t.Errorf("expected 3 items and 8000 bytes, got %d items and %d bytes", allStats.TotalCount, allStats.TotalBytes)
+	}
+	if allStats.Images.Count != 1 || allStats.Images.Bytes != 1000 {
+		t.Errorf("expected 1 image (1000B), got %d (%dB)", allStats.Images.Count, allStats.Images.Bytes)
+	}
+	if allStats.Videos.Count != 1 || allStats.Videos.Bytes != 5000 {
+		t.Errorf("expected 1 video (5000B), got %d (%dB)", allStats.Videos.Count, allStats.Videos.Bytes)
+	}
+	if allStats.Others.Count != 1 || allStats.Others.Bytes != 2000 {
+		t.Errorf("expected 1 other (2000B), got %d (%dB)", allStats.Others.Count, allStats.Others.Bytes)
+	}
+
+	// 2. Stats with guest allowedProjects filter: ["default", "test-project"]
+	guestStats, err := repo.GetStats(ctx, media.ListFilter{
+		Status:          "active",
+		AllowedProjects: []string{"default", "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("GetStats with AllowedProjects failed: %v", err)
+	}
+	if guestStats.TotalCount != 2 || guestStats.TotalBytes != 6000 {
+		t.Errorf("expected 2 guest items and 6000 bytes, got %d items and %d bytes", guestStats.TotalCount, guestStats.TotalBytes)
+	}
+	if guestStats.Others.Count != 0 {
+		t.Errorf("expected 0 others for guest, got %d", guestStats.Others.Count)
+	}
+
+	// 3. GetDistinctProjects with allowedProjects
+	projs, err := repo.GetDistinctProjects(ctx, true, nil, []string{"default", "test-project"})
+	if err != nil {
+		t.Fatalf("GetDistinctProjects failed: %v", err)
+	}
+	if len(projs) != 2 || projs[0] != "default" || projs[1] != "test-project" {
+		t.Errorf("expected [default, test-project], got %v", projs)
+	}
+}
